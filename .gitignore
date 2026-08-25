@@ -13,7 +13,9 @@ yolov8n.pt
 
 # --- PlatformIO build output ------------------------------------------------
 # Build artifacts plus the downloaded RISC-V toolchain.
-firmware/.pio/
+# No leading path: a pattern like "firmware/.pio/" is anchored to this file's
+# directory and would silently miss "<subfolder>/firmware/.pio/".
+.pio/
 
 # --- Captured data ----------------------------------------------------------
 # Recorded replay clips are lossless PNG sequences -- tens of MB each.
