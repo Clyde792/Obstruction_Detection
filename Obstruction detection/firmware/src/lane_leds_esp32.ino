@@ -90,7 +90,7 @@ const unsigned long DIAG_TIMEOUT_MS = 120000;
 // Set to 1 to make the fail-safe blink red instead of holding solid red, so a
 // dead serial link is visually distinct from a commanded '3'. Greens stay off
 // either way, so it is fail-safe in both modes.
-#define FAULT_BLINK 0
+#define FAULT_BLINK 1
 const unsigned long BLINK_MS = 400;
 
 unsigned long lastMsg   = 0;

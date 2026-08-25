@@ -17,9 +17,30 @@ never seen — that fails in the dangerous direction.
   pin self-test: all 8 GPIOs healthy, no solder bridges.
 - **Serial protocol verified on real hardware** — all four states accepted,
   watchdog fires (`FAULT serial silent -> all red`), recovers (`link up`).
-- Board enumerates as **COM8**, VID:PID `303A:1001` (Espressif native USB).
-  Note: the C3's USB re-enumerates on every reset, so the COM port briefly
-  disappears when the board reboots.
+- Board enumerates with VID:PID `303A:1001` (Espressif native USB). It came up
+  as **COM8** originally and as **COM3** on the current machine — the C3's USB
+  re-enumerates on every reset, so the port both disappears briefly on reboot
+  **and can change number**. Never hard-code it; run `led_test.py --list` first.
+
+- **LEDs wired and verified end-to-end.** All 8 on breadboard, resistor soldered
+  to each LED's long leg (anode) toward the GPIO, cathodes to a common GND rail.
+  All four protocol states drive the correct pairs; watchdog fault and recovery
+  both confirmed with LEDs attached.
+- **220Ω on red *and* green.** Only 220Ω was available; it sits inside the
+  150–330Ω range the firmware header recommends, and green was bright enough as
+  wired. If a future green LED is dim, put a second 220Ω in parallel (=110Ω)
+  rather than buying new values.
+
+> **Gotcha: `--selftest` reports `STUCK LOW - shorted to GND?` for any pin that
+> has an LED attached.** The test drives the pin against a weak internal pullup,
+> which an LED + 220Ω to GND overwhelms. This is a false positive, not a fault —
+> `--selftest` is only meaningful with **no LEDs connected**. Cost ~30 min of
+> chasing a nonexistent solder bridge.
+
+> **Gotcha: "all reds on when idle" is correct behaviour, not a wiring fault.**
+> It is the 2000 ms watchdog fail-safe latching after `led_test.py` exits and
+> serial goes quiet. Likewise, diagnostic mode (`--pin`/`--walk`) turns *every*
+> other pin off, so reds going dark during a walk is expected.
 
 ### Firmware — `firmware/src/lane_leds_esp32.ino`
 Built with PlatformIO (installed inside `.venv`, not system-wide).
@@ -36,7 +57,9 @@ Those unused pins are the safe ones to practise soldering on.
 
 **Serial protocol** — `'0'` both clear, `'1'` A blocked, `'2'` B blocked,
 `'3'` both blocked. Resent every 250 ms as a watchdog keep-alive.
-**Fail-safe** — no valid command for 2000 ms → all red.
+**Fail-safe** — no valid command for 2000 ms → all red, **blinking at 400 ms**
+(`FAULT_BLINK 1`, flashed and verified) so a dead laptop is visually distinct
+from a commanded `'3'`. Greens stay off either way.
 **Diagnostics** — `'T'` pin self-test, `'A'`–`'H'` drive one pin, `'X'` all off,
 `'?'` pin map. Diagnostic mode suspends the watchdog, auto-exits after 120 s.
 
@@ -74,6 +97,116 @@ MOG_LEARNING_RATE = 0.00005  MOG_CATCHUP_LEARNING_RATE = 0.0001
 USE_GRADIENT_CHANNEL = True  GRAD_VAR_THRESHOLD = 40
 ```
 
+### Validation clips — RECORDED AND SWEPT (2026-08-26)
+Three clips at `clips/`, all sharing one camera position, zones and baseline:
+`empty` (control), `object-A` (dark object sitting in lane A), `passthrough`
+(hand sweeping through lane A, nothing left behind).
+
+**The shipped constants pass.** At the defaults (`REQUIRE_STABLE_FRAMES = 6`,
+photometric on, gradient on):
+
+| clip | lane A | lane B | verdict |
+|---|---|---|---|
+| `empty` | 0% latched | 0% | correct |
+| `passthrough` | 0% latched | 0% | correct — hand does not trigger |
+| `object-A` | latched at **15.0 s** | 0% | correct |
+
+`REQUIRE_STABLE_FRAMES` sweep (photometric on): 6 → clean, 4 → clean and
+latches at 11.6 s, **2 → `passthrough` falsely latches lane B (7%, t=18.75s)**.
+So 4 is the floor and 6 is the safe default. Do not go below 4.
+
+### The gradient channel is doing ALL the work — real-footage proof
+Re-run of `object-A` with the intensity channel alone:
+
+| | blob min/med/max | latched |
+|---|---|---|
+| gradient **on** | 430 / **1035** / 1402 | 15.0 s |
+| gradient **off** | 0 / **0** / 25 | never |
+
+The object is **invisible to the intensity channel** — median blob 0 px. MOG2's
+shadow classifier rejects it outright; the gradient channel carries the entire
+detection. False-positive cost measured at zero (`empty` is 0 px either way,
+`passthrough` latches under neither). This reproduces on real footage the exact
+failure the synthetic tests predicted, and confirms `USE_GRADIENT_CHANNEL = True`
+and `GRAD_VAR_THRESHOLD = 40` are load-bearing, not optional.
+
+### What actually made this work: framing and object size, not constants
+Two earlier clip sets failed completely and produced *misleading* tuning
+conclusions. Both were data problems, not pipeline problems:
+
+- **Camera moved between baseline and clips.** Messaging someone mid-session
+  tilted the laptop lid. Clips read 29–35% frame-change against the baseline
+  and empty lanes latched. `record_session.bat` now runs calibrate → baseline →
+  all three clips in one uninterrupted pass to make this impossible.
+- **Test object too small.** A ~2% -of-lane object produced a 495 px median blob
+  against a 489 px threshold — flickering right on the bar, 0% surviving the
+  stability gate. It also made photometric alignment *look* harmful (empty-lane
+  median blob 1228 px). With a larger object and correct framing, the empty lane
+  reads **0 px min/med/max with photometric on** — photometric alignment costs
+  nothing and gives a slightly stronger signal. **Leave it on.**
+
+Diagnostic worth keeping: compare clip frames to `baseline.png` directly. If raw
+absdiff inside a lane is ~0 px but the pipeline reports a large blob, the fault
+is upstream of detection — a stale baseline or a moved camera.
+
+Healthy frame-change against a matched baseline is **0.2–1.5%**. Anything near
+30% means the baseline does not match the clip; re-record, do not re-tune.
+
+### Live end-to-end run on real hardware (2026-08-26)
+Camera → detection → serial → LEDs, confirmed working as one chain for the first
+time. Driven through the dashboard's `/api/state` and `/api/action`.
+
+| stage | measured |
+|---|---|
+| both lanes clear | `cmd=0`, blob 0 px both lanes, frame-change **0.0%** |
+| dark object in lane A | latched `cmd=1`, blob ~1500–1800 px vs need 366, held 40 s without absorption |
+| object removed | released to `cmd=0`, blob 0 px, frame-change 0.0% |
+
+The freeze gate holds a latched lane against absorption — 40 s with no decay.
+`RELEASE_SECONDS = 3.0` is **still not stopwatch-verified**: the release completed
+between polls, so only the settled state was captured, not the transition.
+
+### Zone polygons must sit INSIDE the paper — this caused a false positive
+Lane B latched RED with nothing in it. Cause was not the detector: only **2 of 4
+corners** of each lane polygon were on the paper, the rest sat on bare dark wood.
+Dark, textured surfaces are the noisiest thing in frame and MOG2 finds real
+structure in them every frame.
+
+Shrinking each polygon toward its centroid until all four corners landed on the
+paper (lane B needed **f=0.50**) took the noise floor from 2.6–3.6% frame-change
+to **0.0%**, blob 0 px in both lanes. Detect the paper by Otsu-thresholding the
+baseline, keep the largest component, erode ~15 px for margin.
+
+Note the threshold is `OCCUPY_BLOB_FRAC` × lane area, so shrinking a lane also
+shrinks its threshold — lane B went from need=460 px to need=116 px, i.e. it
+became the *more* sensitive lane. Redraw lanes larger by hand once framing allows.
+
+### Measured blind spot: pale smooth object on pale background
+A white tape roll on white paper, live:
+
+| | tape roll (pale, smooth) | scissors (dark, textured) |
+|---|---|---|
+| blob vs need=366 | 450–950, swinging 2× | **1500–1800, steady** |
+| spatial stability | flickering | **True in 54/57 samples** |
+| credit | stalled ~5.0/8.0 | **pinned 8.0/8.0** |
+| after 30 s | **absorbed to 0 px** | still held |
+| outcome | never latched | latched, correct |
+
+The gradient channel picked up only the tape's circular rim, not its interior —
+exactly the "helps for textured objects, not smooth ones" limitation, now with
+real numbers rather than synthetic frames.
+
+**Absorption beats a stalled lane.** If credit never reaches the threshold the
+lane never latches, so the freeze gate never engages, so the background model
+keeps learning until the object *is* the background. Measured at ~30 s — thinner
+than the 4.6× margin the catch-up-rate note above implies. A lane stuck at
+partial credit is therefore not merely "slow to trigger", it is on a timer to
+silently give up.
+
+**Operational rule:** to reset the model with an object already in a lane, use
+`reset_model` (restores the saved clean `baseline.png`), never `recapture_baseline`
+— the latter would absorb the object into the reference permanently.
+
 ### Bugs found and fixed (all verified with tests)
 - **Stopwatch persistence** falsely triggered on intermittent noise → replaced with
   a leaky integrator requiring >50% duty cycle.
@@ -97,65 +230,31 @@ USE_GRADIENT_CHANNEL = True  GRAD_VAR_THRESHOLD = 40
 
 ## PENDING
 
-### 1. Hardware blocker — LEDs not yet bought
-Everything upstream and downstream is verified. This is the only thing stopping a
-real end-to-end test.
-
-**Order:** 10 × 5mm red diffused, 10 × 5mm green diffused (high-brightness),
-plus a 1/4W resistor assortment including 47Ω / 68Ω / 100Ω / 220Ω.
-
-- Start with **220Ω on red**, **100Ω on green**.
-- Existing 820Ω resistors give only ~1.6 mA — they work but are dim.
-- If the green LEDs are 3.0–3.4 V Vf, headroom on 3.3 V is only ~0.3 V; drop to
-  68Ω or 47Ω. If still too dim, drive green from the 5 V pin via an NPN transistor.
-- **Mount on breadboard — no soldering needed.** Only the C3's header pins needed
-  solder, and that's done.
-
-Once wired: `led_test.py --port COM8 --walk` lights each position in turn.
-
-### 2. Validation clips not recorded
-`replay.py` exists but there are **no clips**. The one clip that tuned
-`REQUIRE_STABLE_FRAMES` was lost, so those values are **effectively unvalidated**.
-
-Record these (baseline first, then don't touch the laptop):
-```
-lane_detect.py --baseline          # lanes empty, current lighting
-replay.py record empty       --seconds 20 --note "control"
-replay.py record textured-B  --seconds 20 --note "dark textured object in B"
-replay.py record solid-A     --seconds 20 --note "smooth hard object in A"
-replay.py record passthrough --seconds 20 --note "hand through, nothing left"
-replay.py record light-change --seconds 20 --note "light toggled mid-clip"
-```
-Then `replay.py run <name>` and `replay.py run <name> --no-gradient` to compare.
-
-### 3. Gradient channel only synthetically validated
-Measured on synthetic frames:
-- Dark **textured** object: intensity **0 px**, gradient **41,109 px** — MOG2's
-  shadow classifier was *rejecting a real object*. Likely explains a live case
-  where a visible object read CLEAR.
-- Solid **untextured** object: gradient **0 px** (known blind spot — intensity
-  covers it at 48,000 px).
-- All three lighting scenarios: gradient **0 px** — no measured false-positive cost.
-
-`GRAD_VAR_THRESHOLD = 40` has **never been tested on real footage.**
-
-### 4. Environment / lighting
+### 1. Environment / lighting
 The room was too dim and unevenly lit for reliable detection. Under good lighting
 this pipeline detected a screwdriver cleanly at 8.1 s with zero cross-lane noise.
 **Better lighting will fix more than any further code change.**
+
+Confirmed again 2026-08-26: in a dim room with the breadboard and lit LEDs inside
+the frame, an *empty* lane read 26.7% fill while a real object read 33.6% — signal
+and noise essentially indistinguishable. Fixing the light, moving the electronics
+out of shot, and filling the frame with the paper dropped the empty lane to 0.0%.
+**Keep the LEDs out of the camera's view** — they are lit by the detector's own
+output, so leaving them in frame closes a feedback loop.
 Also: `--lock-exposure` exists but isn't being used — auto-exposure turns a local
 lighting change into a global frame change.
 
-### 5. Small pending items
-- **`FAULT_BLINK = 0`** in firmware — should be `1`. A dead laptop currently looks
-  *identical* to a commanded "both blocked". One-line change.
+### 2. Small pending items
 - **No firmware echo** — the dashboard shows *commanded* state, never *confirmed*.
   Nothing proves the LEDs match the decision.
 - **Event log is in-memory only** (300 entries, lost on restart) — should be JSONL.
-- **Dashboard icons never actually rendered** until `icons.json` was added to the
-  repo — worth confirming visually on the next run.
+- **`FEED LOST` badge stays visible while the feed is working.** Confirmed live:
+  `/stream.mjpg` decoding fine at 640x480, `img.complete` true, yet the badge is
+  `display:inline; opacity:1`. It is not hidden on recovery. Cosmetic, but a
+  permanent false warning on an operator display trains people to ignore warnings.
 - **Calibration canvas fix and modal layout fix** were applied but **never verified
-  live**.
+  live** — the dashboard was driven via the HTTP API this session, not by clicking.
+- **Dashboard icons confirmed rendering** (21 SVGs in the DOM) — `icons.json` works.
 
 ---
 
@@ -168,8 +267,9 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pip install ultralytics opencv-python pyserial platformio
 ```
 
-`zones.json` and `baseline.png` are **not** in the repo — they're specific to
-wherever the camera sits. Regenerate:
+`zones.json`, `baseline.png` and `clips/` are **not** in the repo — they're
+specific to wherever the camera sits. Regenerate everything in one uninterrupted
+pass with `record_session.bat` (calibrate → baseline → 3 clips), or by hand:
 ```bat
 .venv\Scripts\python.exe lane_detect.py --calibrate
 .venv\Scripts\python.exe lane_detect.py --baseline
@@ -177,20 +277,32 @@ wherever the camera sits. Regenerate:
 
 `yolov8n.pt` downloads automatically on first run (~6.5 MB).
 
+**Verified working on Python 3.14 / OpenCV 5** (2026-08-25). cp314 wheels exist
+for everything; pip resolves `opencv-python` to **5.0.0.93**, a major-version
+jump from the OpenCV 4 this was written against. The APIs the pipeline uses
+(`createBackgroundSubtractorMOG2`, `threshold`, `findContours`,
+`connectedComponentsWithStats`, `Sobel`, `VideoCapture`) all still work — but
+OpenCV 5 is otherwise untested here, so pin to `opencv-python<5` if odd
+behaviour appears.
+
 ### Running
 ```bat
 .venv\Scripts\python.exe dashboard.py --no-serial --fast     :: dashboard, no hardware
-.venv\Scripts\python.exe dashboard.py --port COM8            :: with the ESP32
+.venv\Scripts\python.exe dashboard.py --port COM3            :: with the ESP32
 .venv\Scripts\python.exe lane_detect.py --no-serial --show-mask   :: CLI + mask view
+.venv\Scripts\python.exe replay.py list                      :: recorded clips
+.venv\Scripts\python.exe replay.py run object-A             :: replay one deterministically
 .venv\Scripts\python.exe led_test.py --list                  :: find the board
-.venv\Scripts\python.exe led_test.py --port COM8 --selftest  :: check the 8 GPIOs
+.venv\Scripts\python.exe led_test.py --port COM3 --selftest  :: check the 8 GPIOs, NO LEDs attached
+.venv\Scripts\python.exe led_test.py --port COM3             :: walk all 4 protocol states
+.venv\Scripts\python.exe led_test.py --port COM3 --walk      :: light each pin in turn
 ```
 Dashboard runs at http://127.0.0.1:8000
 
 ### Flashing firmware
 ```bat
 cd firmware
-..\.venv\Scripts\platformio.exe run -t upload --upload-port COM8
+..\.venv\Scripts\platformio.exe run -t upload --upload-port COM3
 ```
 Upload can fail on the first attempt because the C3's USB re-enumerates — just retry.
 
