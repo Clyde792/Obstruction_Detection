@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lane Monitor</title>
+<style>
+/* Palette is deliberately NOT pure red/green. A standard status green vs red
+   pair measures ~4.1 perceptual distance under deuteranopia -- effectively
+   indistinguishable. Shifting green toward teal raises that to ~12.8 while
+   still reading unmistakably as "green" to normal vision. The ESP32's actual
+   LEDs stay red/green; only the screen compensates. */
+:root{
+  --page:#0A0E14; --panel:#131A24; --inset:#0E141C;
+  --border:#26313F; --border-soft:#1C2531;
+  --text:#E8EDF4; --text-2:#9FADC0; --text-mute:#6B7889;
+  --clear:#00D18F; --confirm:#F5A524; --blocked:#F0443A; --info:#4C9AFF;
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px;
+  --r-chip:6px; --r-inner:8px; --r-card:12px; --r-pill:999px;
+  --font:system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:ui-monospace,"Cascadia Mono",Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--page); color:var(--text); font-family:var(--font);
+  display:grid; gap:var(--sp-3); padding:var(--sp-3);
+  grid-template-columns:minmax(0,3fr) minmax(380px,1.35fr);
+  grid-template-rows:auto auto minmax(0,1fr) auto;
+  grid-template-areas:"head head" "alert alert" "feed side" "diag diag";
+  overflow:hidden;
+}
+.num{font-family:var(--mono); font-variant-numeric:tabular-nums}
+.panel{background:var(--panel); border:1px solid var(--border); border-radius:var(--r-card)}
+.lbl{font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--text-mute)}
+
+/* ---------- header ---------- */
+header{grid-area:head; display:flex; align-items:center; gap:var(--sp-4); padding:0 var(--sp-1)}
+header h1{font-size:16px; font-weight:700; letter-spacing:.04em; margin:0; display:flex; align-items:center; gap:var(--sp-2)}
+header h1 svg{width:20px;height:20px;color:var(--info)}
+.spacer{flex:1}
+.chip{display:inline-flex; align-items:center; gap:6px; padding:5px 11px; border-radius:var(--r-pill);
+  background:var(--inset); border:1px solid var(--border); font-size:12px; font-weight:600; color:var(--text-2)}
+.chip svg{width:14px;height:14px}
+.chip.on{color:var(--clear); border-color:color-mix(in oklab,var(--clear) 45%,var(--border))}
+.chip.off{color:var(--text-mute)}
+.chip.warn{color:var(--confirm); border-color:color-mix(in oklab,var(--confirm) 45%,var(--border))}
+
+/* ---------- alert band ---------- */
+#alert{grid-area:alert; display:none; align-items:center; gap:var(--sp-3);
+  padding:var(--sp-3) var(--sp-4); border-radius:var(--r-inner);
+  background:color-mix(in oklab,var(--confirm) 16%,var(--panel));
+  border:1px solid color-mix(in oklab,var(--confirm) 55%,var(--border)); font-size:13px}
+#alert.show{display:flex}
+#alert svg{width:20px;height:20px;color:var(--confirm);flex:none}
+#alert b{color:var(--text)}
+
+/* ---------- feed ---------- */
+.feed{grid-area:feed; position:relative; background:#000; border-radius:var(--r-card);
+  border:1px solid var(--border); overflow:hidden; display:flex; align-items:center; justify-content:center}
+.feed img{width:100%;height:100%;object-fit:contain;display:block}
+/* canvas is a replaced element with an intrinsic 300x150 default size --
+   inset:0 alone does NOT stretch it to fill an absolutely positioned parent
+   the way it would a <div>. Without explicit width/height it sits in the
+   top-left corner, so clicks anywhere else on the video hit nothing. */
+#calibLayer{position:absolute; inset:0; width:100%; height:100%; cursor:crosshair; display:none}
+#calibLayer.on{display:block}
+#feedLost{position:absolute; inset:0; display:none; flex-direction:column; gap:var(--sp-2);
+  align-items:center; justify-content:center; background:var(--inset); color:var(--info); font-weight:700}
+#feedLost.show{display:flex}
+#feedLost svg{width:40px;height:40px}
+.feedbar{position:absolute; left:0; right:0; bottom:0; display:flex; gap:var(--sp-2);
+  padding:var(--sp-2) var(--sp-3); background:linear-gradient(transparent,rgba(10,14,20,.92)); align-items:center}
+
+/* ---------- side column ---------- */
+.side{grid-area:side; display:flex; flex-direction:column; gap:var(--sp-3); min-height:0; overflow-y:auto; padding-right:2px}
+.side::-webkit-scrollbar{width:8px}
+.side::-webkit-scrollbar-thumb{background:var(--border); border-radius:4px}
+
+/* ---------- lane cards ---------- */
+.lane{position:relative; padding:var(--sp-4); border-radius:var(--r-card); border:1px solid var(--border);
+  border-left:12px solid var(--state); background:color-mix(in oklab,var(--state) 8%,var(--panel));
+  transition:background 160ms ease,border-color 160ms ease,box-shadow 160ms ease}
+.lane[data-state=clear]{--state:var(--clear)}
+.lane[data-state=confirming]{--state:var(--confirm)}
+.lane[data-state=blocked]{--state:var(--blocked); transition-duration:0ms;
+  box-shadow:0 0 0 1px var(--blocked),0 0 34px -8px color-mix(in oklab,var(--blocked) 70%,transparent)}
+.lane-top{display:flex; align-items:center; gap:var(--sp-3)}
+.lane-icon{width:34px;height:34px;color:var(--state);flex:none}
+.lane-name{font-size:13px; font-weight:700; letter-spacing:.1em; color:var(--text-2)}
+.lane-state{font-size:clamp(24px,2.4vw,34px); font-weight:800; letter-spacing:.02em; line-height:1; color:var(--state)}
+@keyframes pulse{50%{opacity:.45}}
+.lane[data-state=confirming] .lane-icon{animation:pulse 1.1s ease-in-out infinite}
+.ovr{margin-left:auto; font-size:10px; font-weight:800; letter-spacing:.06em; padding:4px 8px;
+  border-radius:var(--r-chip); background:var(--blocked); color:#0A0E14}
+.ovr.green{background:var(--info)}
+
+.meter{margin-top:var(--sp-3)}
+.meter-head{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px}
+.meter-head .v{font-size:15px; font-weight:600; color:var(--text)}
+.track{position:relative; height:14px; border-radius:7px; background:var(--inset);
+  box-shadow:inset 0 0 0 1px var(--border-soft); overflow:hidden}
+.fill{height:100%; background:var(--state); border-radius:7px; transition:width 120ms linear}
+.ticks{position:absolute; inset:0; pointer-events:none;
+  background:repeating-linear-gradient(90deg,transparent 0 calc(12.5% - 1px),rgba(10,14,20,.55) calc(12.5% - 1px) 12.5%)}
+.release{position:absolute; top:-3px; bottom:-3px; width:2px; background:var(--text-2); border-radius:1px}
+.track2{margin-top:var(--sp-2); height:6px; border-radius:3px; background:var(--inset);
+  box-shadow:inset 0 0 0 1px var(--border-soft); overflow:hidden}
+.fill2{height:100%; background:var(--text-2); border-radius:3px; transition:width 160ms ease}
+.meter-foot{display:flex; justify-content:space-between; margin-top:5px; font-size:11px; color:var(--text-mute)}
+
+.lane-actions{display:flex; gap:6px; margin-top:var(--sp-3)}
+.seg{display:flex; background:var(--inset); border:1px solid var(--border); border-radius:var(--r-chip); overflow:hidden; flex:1}
+.seg button{flex:1; background:none; border:0; color:var(--text-2); font-family:var(--font);
+  font-size:11px; font-weight:700; letter-spacing:.04em; padding:7px 4px; cursor:pointer; transition:background 120ms}
+.seg button:hover{background:#1A2432; color:var(--text)}
+.seg button.sel{background:var(--text-2); color:var(--page)}
+.seg button.sel[data-mode=red]{background:var(--blocked); color:#0A0E14}
+.seg button.sel[data-mode=green]{background:var(--info); color:#0A0E14}
+
+/* ---------- controls ---------- */
+.sect{padding:var(--sp-4)}
+.sect h2{font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--text-mute); margin:0 0 var(--sp-3)}
+.grid2{display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-2)}
+button.act{display:flex; align-items:center; gap:var(--sp-2); width:100%; text-align:left;
+  padding:10px var(--sp-3); border-radius:var(--r-inner); border:1px solid var(--border);
+  background:var(--inset); color:var(--text); font-family:var(--font); font-size:12.5px;
+  font-weight:600; cursor:pointer; transition:background 120ms,border-color 120ms}
+button.act svg{width:16px;height:16px;color:var(--text-2);flex:none}
+button.act:hover{background:#1A2432; border-color:#33404f}
+button.act:active{transform:translateY(1px)}
+button.act.danger{border-color:color-mix(in oklab,var(--blocked) 45%,var(--border))}
+button.act.danger svg{color:var(--blocked)}
+button.act.primary{border-color:color-mix(in oklab,var(--info) 50%,var(--border))}
+button.act.primary svg{color:var(--info)}
+button.act:focus-visible{outline:2px solid var(--info); outline-offset:2px}
+
+.tog{display:flex; align-items:center; justify-content:space-between; padding:8px var(--sp-3);
+  border-radius:var(--r-inner); background:var(--inset); border:1px solid var(--border);
+  font-size:12.5px; cursor:pointer; margin-bottom:6px}
+.tog:hover{background:#1A2432}
+.tog .sw{width:34px;height:19px;border-radius:var(--r-pill); background:var(--border); position:relative; transition:background 160ms}
+.tog .sw::after{content:""; position:absolute; top:2px; left:2px; width:15px;height:15px; border-radius:50%;
+  background:var(--text-mute); transition:transform 160ms,background 160ms}
+.tog.on .sw{background:color-mix(in oklab,var(--info) 55%,var(--inset))}
+.tog.on .sw::after{transform:translateX(15px); background:var(--info)}
+
+.slider{margin-bottom:var(--sp-3)}
+.slider .row{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:5px}
+.slider .row span:last-child{font-size:12px; color:var(--text)}
+input[type=range]{width:100%; -webkit-appearance:none; height:4px; border-radius:2px; background:var(--border); outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; width:15px;height:15px;border-radius:50%;
+  background:var(--info); cursor:pointer; border:2px solid var(--panel)}
+
+/* ---------- diag ---------- */
+.diag{grid-area:diag; display:grid; grid-template-columns:repeat(7,1fr); gap:var(--sp-2)}
+.tile{padding:9px var(--sp-3); border-radius:var(--r-inner); background:var(--panel); border:1px solid var(--border)}
+.tile .v{font-size:17px; font-weight:600; margin-top:2px}
+.tile.alarm{border-color:var(--blocked)} .tile.alarm .v{color:var(--blocked)}
+.tile.warn{border-color:var(--confirm)} .tile.warn .v{color:var(--confirm)}
+.tile.ok .v{color:var(--clear)}
+
+/* ---------- log ---------- */
+#log{max-height:190px; overflow-y:auto; font-size:11.5px}
+#log div{display:flex; gap:var(--sp-2); padding:3px 0; border-bottom:1px solid var(--border-soft)}
+#log .t{color:var(--text-mute); flex:none}
+#log .info{color:var(--text-2)} #log .ok{color:var(--clear)}
+#log .warn{color:var(--confirm)} #log .error{color:var(--blocked)}
+
+/* ---------- modal ---------- */
+#modal{position:fixed; inset:0; background:rgba(5,8,12,.78); display:none; align-items:center; justify-content:center; z-index:50; padding:var(--sp-4)}
+#modal.show{display:flex}
+.mbox{width:min(480px,94vw); padding:var(--sp-5); border-radius:var(--r-card); background:var(--panel); border:1px solid var(--blocked);
+  box-shadow:0 20px 60px -12px rgba(0,0,0,.6)}
+.mbox h3{margin:0 0 var(--sp-3); font-size:18px; display:flex; align-items:center; gap:10px}
+.mbox h3 svg{width:22px;height:22px;color:var(--blocked); flex:none}
+.mbox p{color:var(--text-2); font-size:13.5px; line-height:1.6; margin:0 0 var(--sp-5)}
+.mrow{display:flex; gap:var(--sp-3)}
+/* button.act sets width:100%, which fights flex sizing here -- without this
+   reset the Cancel button claims nearly the whole row and Hold gets crushed
+   into a sliver, clipping its text (the bug reported: "old t / onfir"). */
+.mrow button.act{flex:1; width:auto; justify-content:center; white-space:nowrap; padding:12px var(--sp-3)}
+.hold{position:relative; overflow:hidden; flex-direction:column; gap:2px !important}
+.hold .bar{position:absolute; inset:0; background:var(--blocked); width:0; transition:width 60ms linear; opacity:.55}
+.hold span{position:relative; z-index:1}
+.hold .sub{font-size:10px; font-weight:600; color:var(--text-2); letter-spacing:.03em; text-transform:none}
+.hold.danger span:first-of-type{color:var(--text)}
+
+@media (prefers-reduced-motion:reduce){
+  *{animation:none !important; transition-duration:0ms !important}
+  .lane[data-state=confirming] .lane-icon{outline:2px dashed var(--confirm); outline-offset:3px; border-radius:50%}
+}
+@media (max-width:1150px){
+  body{grid-template-columns:1fr; grid-template-areas:"head" "alert" "side" "feed" "diag"; overflow:auto}
+  .diag{grid-template-columns:repeat(3,1fr)}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1><i data-i="radio"></i> LANE MONITOR</h1>
+  <span class="spacer"></span>
+  <span class="chip" id="chipCal" style="display:none"><i data-i="crosshair"></i><span>calibrating</span></span>
+  <span class="chip" id="chipModel"><i data-i="cpu"></i><span>model</span></span>
+  <span class="chip" id="chipSerial"><i data-i="cable"></i><span>serial</span></span>
+  <span class="chip" id="chipCmd"><i data-i="radio"></i><span>cmd</span></span>
+</header>
+
+<div id="alert"><i data-i="triangle-alert"></i><span id="alertText"></span></div>
+
+<div class="feed">
+  <img id="feed" src="/stream.mjpg" alt="live camera">
+  <canvas id="calibLayer"></canvas>
+  <div id="feedLost"><i data-i="octagon-x"></i><span>FEED LOST</span></div>
+  <div class="feedbar" id="calibBar" style="display:none">
+    <span class="lbl" id="calibHint"></span>
+    <span class="spacer"></span>
+    <button class="act" style="width:auto" onclick="calibUndo()"><i data-i="rotate-ccw"></i>Undo</button>
+    <button class="act primary" style="width:auto" onclick="calibSave()"><i data-i="save"></i>Save lanes</button>
+    <button class="act" style="width:auto" onclick="calibStop()"><i data-i="octagon-x"></i>Cancel</button>
+  </div>
+</div>
+
+<div class="side">
+  <div id="lanes"></div>
+
+  <div class="panel sect">
+    <h2>Recovery</h2>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <button class="act primary" onclick="act('relearn')"><i data-i="refresh-cw"></i>Unstick — relearn current scene</button>
+      <button class="act" onclick="act('reset_model')"><i data-i="rotate-ccw"></i>Reset model from saved baseline</button>
+      <button class="act danger" onclick="rebaseline()"><i data-i="scan-line"></i>Re-capture baseline (90 frames)</button>
+    </div>
+  </div>
+
+  <div class="panel sect">
+    <h2>Calibration &amp; capture</h2>
+    <div class="grid2">
+      <button class="act" onclick="calibStart()"><i data-i="crosshair"></i>Draw lanes</button>
+      <button class="act" onclick="act('calib_auto',{split:'lr'})"><i data-i="scan-line"></i>Auto split</button>
+      <button class="act" onclick="act('snapshot')"><i data-i="image-down"></i>Snapshot</button>
+      <button class="act" onclick="openPorts()"><i data-i="cable"></i>Serial…</button>
+    </div>
+  </div>
+
+  <div class="panel sect">
+    <h2>View &amp; pipeline</h2>
+    <div id="toggles"></div>
+  </div>
+
+  <div class="panel sect">
+    <h2>Tuning</h2>
+    <div id="sliders"></div>
+  </div>
+
+  <div class="panel sect">
+    <h2 style="display:flex;align-items:center;gap:8px"><i data-i="list" style="width:13px;height:13px"></i>Event log</h2>
+    <div id="log"></div>
+  </div>
+</div>
+
+<div class="diag" id="diag"></div>
+
+<div id="modal"><div class="mbox">
+  <h3><i data-i="triangle-alert"></i><span id="mTitle"></span></h3>
+  <p id="mBody"></p>
+  <div class="mrow">
+    <button class="act" style="justify-content:center" onclick="closeModal()">Cancel</button>
+    <button class="act danger hold" id="mHold" style="justify-content:center">
+      <span class="bar"></span><span id="mHoldText">Hold to confirm</span>
+    </button>
+  </div>
+</div></div>
+
+<script>
+let ICONS={}, S=null, calib=null, lastFrameTs=0;
+
+/* Inline SVG (Lucide, ISC) rather than <img> icons: they inherit currentColor,
+   so an icon recolours with its lane's state for free, and stay crisp at any
+   size with no extra network requests. */
+function svg(name,cls){
+  const inner=ICONS[name]||"";
+  return `<svg class="${cls||''}" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+}
+function paintIcons(root){
+  (root||document).querySelectorAll("i[data-i]").forEach(el=>{
+    el.outerHTML=svg(el.dataset.i, el.className);
+  });
+}
+const fmtUp=s=>{const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=Math.floor(s%60);
+  return h?`${h}h ${String(m).padStart(2,"0")}m`:m?`${m}m ${String(x).padStart(2,"0")}s`:`${x}s`;};
+
+async function act(action,params={}){
+  const r=await fetch("/api/action",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({action,params})});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok && j.needs_force) confirmModal("Lane is currently BLOCKED",j.error+
+      " Continue only if you have physically verified both lanes are empty.",
+      ()=>act("recapture_baseline",{force:true}));
+  else if(!r.ok) alert(j.error||"action failed");
+  return j;
+}
+
+/* ---- guarded actions ---- */
+let holdTimer=null;
+function confirmModal(title,body,onConfirm){
+  document.getElementById("mTitle").textContent=title;
+  document.getElementById("mBody").textContent=body;
+  document.getElementById("modal").classList.add("show");
+  const btn=document.getElementById("mHold"), bar=btn.querySelector(".bar");
+  let t=0;
+  const start=()=>{ // hold-to-confirm: a click-through-able dialog gets ignored within a day
+    clearInterval(holdTimer);
+    holdTimer=setInterval(()=>{ t+=60; bar.style.width=(t/1200*100)+"%";
+      if(t>=1200){clearInterval(holdTimer); bar.style.width="0"; closeModal(); onConfirm();}},60);
+  };
+  const stop=()=>{clearInterval(holdTimer); t=0; bar.style.width="0";};
+  btn.onmousedown=start; btn.onmouseup=stop; btn.onmouseleave=stop;
+  btn.ontouchstart=e=>{e.preventDefault();start();}; btn.ontouchend=stop;
+}
+function closeModal(){clearInterval(holdTimer);document.getElementById("modal").classList.remove("show");}
+function rebaseline(){
+  confirmModal("Re-capture baseline",
+    "This records the CURRENT view as 'normal'. Anything sitting in a lane right now "+
+    "becomes invisible to the detector permanently. Make sure both lanes are physically empty.",
+    ()=>act("recapture_baseline"));
+}
+function setOverride(lane,mode){
+  if(mode==="green"){
+    confirmModal("Force LANE "+lane+" CLEAR",
+      "This overrides the detector and shows GREEN to drivers even if an obstruction is present. "+
+      "It expires automatically after 5 minutes. Only do this if you can see the lane is clear.",
+      ()=>act("override",{lane,mode,confirmed:true}));
+  } else act("override",{lane,mode});
+}
+
+/* ---- browser lane calibration ---- */
+function calibStart(){
+  calib={lane:"A",pts:{A:[],B:[]}};
+  document.getElementById("calibLayer").classList.add("on");
+  document.getElementById("calibBar").style.display="flex";
+  document.getElementById("chipCal").style.display="inline-flex";
+  drawCalib();
+}
+function calibStop(){
+  calib=null;
+  document.getElementById("calibLayer").classList.remove("on");
+  document.getElementById("calibBar").style.display="none";
+  document.getElementById("chipCal").style.display="none";
+}
+function calibUndo(){ if(calib&&calib.pts[calib.lane].length) calib.pts[calib.lane].pop(); drawCalib(); }
+function calibSave(){
+  if(!calib) return;
+  if(calib.pts.A.length!==4||calib.pts.B.length!==4){alert("Each lane needs exactly 4 corners.");return;}
+  act("calib_set",{lanes:calib.pts}); calibStop();
+}
+document.getElementById("calibLayer").addEventListener("click",e=>{
+  if(!calib) return;
+  const c=e.currentTarget, r=c.getBoundingClientRect();
+  const img=document.getElementById("feed");
+  // map click -> normalised image coords, accounting for object-fit:contain letterboxing
+  const ar=(img.naturalWidth||4)/(img.naturalHeight||3), br=r.width/r.height;
+  let w=r.width,h=r.height,ox=0,oy=0;
+  if(br>ar){w=r.height*ar; ox=(r.width-w)/2;} else {h=r.width/ar; oy=(r.height-h)/2;}
+  const x=(e.clientX-r.left-ox)/w, y=(e.clientY-r.top-oy)/h;
+  if(x<0||x>1||y<0||y>1) return;
+  const cur=calib.pts[calib.lane];
+  if(cur.length<4) cur.push([x,y]);
+  if(cur.length===4&&calib.lane==="A") calib.lane="B";
+  drawCalib();
+});
+function drawCalib(){
+  const c=document.getElementById("calibLayer"); if(!calib) return;
+  const r=c.getBoundingClientRect(); c.width=r.width; c.height=r.height;
+  const img=document.getElementById("feed");
+  const ar=(img.naturalWidth||4)/(img.naturalHeight||3), br=r.width/r.height;
+  let w=r.width,h=r.height,ox=0,oy=0;
+  if(br>ar){w=r.height*ar; ox=(r.width-w)/2;} else {h=r.width/ar; oy=(r.height-h)/2;}
+  const g=c.getContext("2d"); g.clearRect(0,0,c.width,c.height);
+  for(const [lane,col] of [["A","#00D18F"],["B","#4C9AFF"]]){
+    const pts=calib.pts[lane]; if(!pts.length) continue;
+    g.strokeStyle=col; g.fillStyle=col; g.lineWidth=2.5; g.beginPath();
+    pts.forEach(([x,y],i)=>{const px=ox+x*w,py=oy+y*h; i?g.lineTo(px,py):g.moveTo(px,py);});
+    if(pts.length===4) g.closePath();
+    g.stroke();
+    pts.forEach(([x,y],i)=>{const px=ox+x*w,py=oy+y*h;
+      g.beginPath(); g.arc(px,py,7,0,7); g.fill();
+      g.fillStyle="#0A0E14"; g.font="bold 11px system-ui"; g.textAlign="center";
+      g.fillText(i+1,px,py+4); g.fillStyle=col;});
+  }
+  document.getElementById("calibHint").textContent=
+    `LANE ${calib.lane} — click ${4-calib.pts[calib.lane].length} more corner(s)`;
+}
+
+async function openPorts(){
+  const j=await (await fetch("/api/ports")).json();
+  const list=(j.ports||[]).map(p=>`${p.device}${p.espressif?"  (ESP32)":""} — ${p.desc}`).join("\n")||"none found";
+  const pick=prompt("Serial ports:\n\n"+list+"\n\nEnter port (blank = disconnect):","");
+  if(pick===null) return;
+  if(pick.trim()) act("serial_connect",{port:pick.trim()}); else act("serial_disconnect");
+}
+
+/* ---- render ---- */
+const STATE_ICON={clear:"circle-check",confirming:"triangle-alert",blocked:"octagon-x"};
+function laneState(L){return L.blocked?"blocked":(L.occupied||L.credit>0.2)?"confirming":"clear";}
+
+function render(s){
+  S=s;
+  if(s.status!=="running"){document.getElementById("alertText").innerHTML="<b>"+(s.error||s.status)+"</b>";
+    document.getElementById("alert").classList.add("show"); return;}
+
+  // lanes
+  const box=document.getElementById("lanes");
+  const names=Object.keys(s.lanes).sort();
+  if(box.children.length!==names.length){
+    box.innerHTML=names.map(n=>`<div class="lane" id="lane${n}" style="margin-bottom:12px"></div>`).join("");
+  }
+  names.forEach(n=>{
+    const L=s.lanes[n], st=laneState(L), el=document.getElementById("lane"+n);
+    el.dataset.state=st;
+    const pct=Math.min(L.credit/L.block_seconds*100,100);
+    const rel=L.release_seconds/L.block_seconds*100;
+    const blobPct=Math.min(L.blob/Math.max(L.need,1)*100,100);
+    const exp=(s.override_expires||{})[n];
+    el.innerHTML=`
+      <div class="lane-top">
+        ${svg(STATE_ICON[st],"lane-icon")}
+        <div><div class="lane-name">LANE ${n}</div>
+             <div class="lane-state">${st==="confirming"?"CONFIRMING":st.toUpperCase()}</div></div>
+        ${L.override!=="auto"?`<span class="ovr ${L.override==="green"?"green":""}">
+            ${L.override==="green"?"FORCED CLEAR":"FORCED RED"}${exp?" "+Math.ceil(exp)+"s":""}</span>`:""}
+      </div>
+      <div class="meter">
+        <div class="meter-head"><span class="lbl">confirmation</span>
+          <span class="v num">${L.credit.toFixed(1)} / ${L.block_seconds.toFixed(1)}s</span></div>
+        <div class="track"><div class="fill" style="width:${pct}%"></div>
+          <div class="ticks"></div><div class="release" style="left:${rel}%"></div></div>
+        <div class="meter-foot"><span>release ${L.release_seconds.toFixed(1)}s</span>
+          <span>${st==="blocked"?"draining to release":"→ BLOCKED at "+L.block_seconds.toFixed(1)+"s"}</span></div>
+        <div class="track2"><div class="fill2" style="width:${blobPct}%"></div></div>
+        <div class="meter-foot"><span class="num">blob ${L.blob} / ${L.need} px</span>
+          <span class="num">${L.pct_of_need}% of threshold</span></div>
+      </div>
+      <div class="lane-actions"><div class="seg">
+        ${["auto","red","green"].map(m=>`<button data-mode="${m}" class="${L.override===m?"sel":""}"
+           onclick="setOverride('${n}','${m}')">${m==="auto"?"AUTO":m==="red"?"FORCE RED":"FORCE CLEAR"}</button>`).join("")}
+      </div></div>`;
+  });
+
+  // chips
+  const cs=document.getElementById("chipSerial");
+  cs.className="chip "+(s.serial?"on":"off");
+  cs.lastElementChild.textContent=s.serial?s.serial:"no serial";
+  const cm=document.getElementById("chipModel");
+  cm.className="chip "+(s.frozen?"warn":"on");
+  cm.lastElementChild.textContent=s.frozen?"model frozen":(s.yolo?"MOG2 + YOLO":"MOG2");
+  const cc=document.getElementById("chipCmd");
+  cc.className="chip "+(s.cmd==="0"?"on":"warn");
+  cc.lastElementChild.textContent=`cmd ${s.cmd} · ${s.cmd_text}`;
+
+  // alert band
+  let msg="";
+  if(s.baseline_progress!=null) msg=`<b>Capturing baseline ${s.baseline_progress}/90</b> — keep both lanes clear.`;
+  else if(s.likely_moved) msg=`<b>Camera may have moved.</b> ${s.aligned_shift}% of the frame still differs after exposure alignment — that is geometric, not lighting. Re-draw the lanes rather than re-baselining.`;
+  else if(s.frame_change>50) msg=`<b>${s.frame_change}% of the frame changed.</b> Baseline is likely stale — try Unstick, then Re-capture baseline.`;
+  else if(Object.values(s.lanes).some(l=>l.override!=="auto")) msg=`<b>Manual override active.</b> A lane is not being driven by the detector.`;
+  document.getElementById("alert").classList.toggle("show",!!msg);
+  if(msg) document.getElementById("alertText").innerHTML=msg;
+
+  // diag tiles
+  const chg=s.frame_change;
+  document.getElementById("diag").innerHTML=[
+    ["fps",s.fps.toFixed(1),s.fps<5?"warn":"ok"],
+    ["uptime",fmtUp(s.uptime),""],
+    ["serial",s.serial||"—",s.serial?"ok":"warn"],
+    ["command",s.cmd,s.cmd==="0"?"ok":"alarm"],
+    ["frame change",chg+"%",chg>50?"alarm":chg>35?"warn":"ok"],
+    ["shadow px",s.shadow_px,""],
+    ["model",s.frozen?"FROZEN":"learning",s.frozen?"warn":"ok"],
+  ].map(([l,v,c])=>`<div class="tile ${c}"><div class="lbl">${l}</div><div class="v num">${v}</div></div>`).join("");
+
+  // toggles
+  const tg=document.getElementById("toggles");
+  const defs=[["shadow_reject","Reject shadows"],["use_yolo","Vehicle subtraction (YOLO)"],
+              ["photometric","Exposure alignment"],["show_mask","Show detection mask"]];
+  tg.innerHTML=defs.map(([k,label])=>`<div class="tog ${s.params[k]?"on":""}"
+      onclick="act('toggle',{name:'${k}'})"><span>${label}</span><span class="sw"></span></div>`).join("");
+
+  // sliders
+  const sl=document.getElementById("sliders");
+  if(!sl.dataset.built){
+    sl.dataset.built="1";
+    sl.innerHTML=[
+      ["block_seconds","Confirm before BLOCKED","s",2,20,0.5],
+      ["release_seconds","Release threshold","s",0.5,10,0.5],
+      ["blob_px","Object size threshold","px",200,4000,50],
+    ].map(([k,label,unit,mn,mx,stp])=>`<div class="slider">
+        <div class="row"><span class="lbl">${label}</span><span class="num" id="sv_${k}"></span></div>
+        <input type="range" id="s_${k}" min="${mn}" max="${mx}" step="${stp}"
+          oninput="document.getElementById('sv_${k}').textContent=this.value+'${unit}'"
+          onchange="act('set_param',{name:'${k}',value:parseFloat(this.value)})"></div>`).join("");
+  }
+  ["block_seconds","release_seconds","blob_px"].forEach(k=>{
+    const i=document.getElementById("s_"+k);
+    if(document.activeElement!==i){i.value=s.params[k];
+      document.getElementById("sv_"+k).textContent=s.params[k]+(k==="blob_px"?"px":"s");}
+  });
+
+  // log
+  document.getElementById("log").innerHTML=(s.events||[]).map(e=>{
+    const d=new Date(e.t*1000).toTimeString().slice(0,8);
+    return `<div><span class="t num">${d}</span><span class="${e.level}">${e.text}</span></div>`;}).join("");
+
+  lastFrameTs=Date.now();
+}
+
+/* A frozen last frame looks exactly like a working feed of a static scene --
+   the most dangerous failure mode here -- so watch the stream explicitly. */
+document.getElementById("feed").addEventListener("error",()=>
+  document.getElementById("feedLost").classList.add("show"));
+document.getElementById("feed").addEventListener("load",()=>
+  document.getElementById("feedLost").classList.remove("show"));
+
+async function poll(){
+  try{ render(await (await fetch("/api/state")).json());
+       document.getElementById("feedLost").classList.remove("show"); }
+  catch(e){ document.getElementById("feedLost").classList.add("show"); }
+}
+fetch("/icons.json").then(r=>r.json()).then(j=>{ICONS=j; paintIcons(); poll(); setInterval(poll,400);});
+window.addEventListener("resize",()=>{if(calib) drawCalib();});
+</script>
+</body>
+</html>

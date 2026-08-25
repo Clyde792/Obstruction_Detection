@@ -1,0 +1,38 @@
+# --- Python environment -----------------------------------------------------
+# Contains PyTorch and the whole ultralytics stack -- gigabytes. Recreate with:
+#   python -m venv .venv
+#   .venv\Scripts\python.exe -m pip install ultralytics opencv-python pyserial platformio
+.venv/
+__pycache__/
+*.pyc
+
+# --- Downloaded model weights -----------------------------------------------
+# ultralytics fetches this automatically on first run (~6.5 MB).
+yolov8n.pt
+*.pt
+
+# --- PlatformIO build output ------------------------------------------------
+# Build artifacts plus the downloaded RISC-V toolchain.
+firmware/.pio/
+
+# --- Captured data ----------------------------------------------------------
+# Recorded replay clips are lossless PNG sequences -- tens of MB each.
+clips/
+snapshots/
+baseline_history/
+replay-*.csv
+
+# --- Site-specific configuration --------------------------------------------
+# Both are regenerated for wherever the camera is actually mounted:
+#   python lane_detect.py --calibrate   -> zones.json
+#   python lane_detect.py --baseline    -> baseline.png
+# Delete these two lines if you'd rather keep your own calibration in the repo.
+baseline.png
+zones.json
+
+# --- Scratch ----------------------------------------------------------------
+*.orig
+live_check*.jpg
+diagnose.png
+*_preview.png
+current_view.png
