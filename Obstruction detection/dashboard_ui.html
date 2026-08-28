@@ -141,6 +141,27 @@ header h1 svg{width:20px;height:20px;color:var(--info)}
 .sect h2{font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
   color:var(--text-mute); margin:0 0 var(--sp-3)}
 .grid2{display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-2)}
+
+/* ---------- Advanced disclosure ----------
+   Everything setup-time or diagnostic (calibration, recovery, pipeline
+   toggles, tuning sliders, the event log) lives here, collapsed by default,
+   so the default view is just the video and the two lane cards -- what's
+   actually watched during a live demo. Nothing is removed, only deferred
+   one click. Native <details>/<summary>: free keyboard/a11y support, no JS. */
+details.adv{padding:0}
+details.adv summary{list-style:none; cursor:pointer; padding:var(--sp-3) var(--sp-4);
+  display:flex; align-items:center; gap:var(--sp-2);
+  font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--text-mute)}
+details.adv summary::-webkit-details-marker{display:none}
+details.adv summary svg{width:14px;height:14px}
+details.adv summary::after{content:"";margin-left:auto; width:7px; height:7px;
+  border-right:1.5px solid var(--text-mute); border-bottom:1.5px solid var(--text-mute);
+  transform:rotate(45deg); transition:transform 120ms ease}
+details.adv[open] summary::after{transform:rotate(-135deg)}
+details.adv summary:hover{color:var(--text-2)}
+details.adv .advBody{border-top:1px solid var(--border-soft)}
+details.adv .advBody .sect+.sect{border-top:1px solid var(--border-soft)}
 button.act{display:flex; align-items:center; gap:var(--sp-2); width:100%; text-align:left;
   padding:10px var(--sp-3); border-radius:var(--r-inner); border:1px solid var(--border);
   background:var(--inset); color:var(--text); font-family:var(--font); font-size:12.5px;
@@ -251,39 +272,46 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; width:15px;heig
 <div class="side">
   <div id="lanes"></div>
 
-  <div class="panel sect">
-    <h2>Recovery</h2>
-    <div style="display:flex;flex-direction:column;gap:6px">
-      <button class="act primary" onclick="act('relearn')"><i data-i="refresh-cw"></i>Unstick — relearn current scene</button>
-      <button class="act" onclick="act('reset_model')"><i data-i="rotate-ccw"></i>Reset model from saved baseline</button>
-      <button class="act danger" onclick="rebaseline()"><i data-i="scan-line"></i>Re-capture baseline (90 frames)</button>
+  <details class="panel adv" id="advPanel">
+    <summary><i data-i="sliders-horizontal"></i>Advanced</summary>
+    <div class="advBody">
+
+      <div class="sect">
+        <h2>Recovery</h2>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <button class="act primary" onclick="act('relearn')"><i data-i="refresh-cw"></i>Unstick — relearn current scene</button>
+          <button class="act" onclick="act('reset_model')"><i data-i="rotate-ccw"></i>Reset model from saved baseline</button>
+          <button class="act danger" onclick="rebaseline()"><i data-i="scan-line"></i>Re-capture baseline (90 frames)</button>
+        </div>
+      </div>
+
+      <div class="sect">
+        <h2>Calibration &amp; capture</h2>
+        <div class="grid2">
+          <button class="act" onclick="calibStart()"><i data-i="crosshair"></i>Draw lanes</button>
+          <button class="act" onclick="act('calib_auto',{split:'lr'})"><i data-i="scan-line"></i>Auto split</button>
+          <button class="act" onclick="act('snapshot')"><i data-i="image-down"></i>Snapshot</button>
+          <button class="act" onclick="openPorts()"><i data-i="cable"></i>Serial…</button>
+        </div>
+      </div>
+
+      <div class="sect">
+        <h2>View &amp; pipeline</h2>
+        <div id="toggles"></div>
+      </div>
+
+      <div class="sect">
+        <h2>Tuning</h2>
+        <div id="sliders"></div>
+      </div>
+
+      <div class="sect">
+        <h2 style="display:flex;align-items:center;gap:8px"><i data-i="list" style="width:13px;height:13px"></i>Event log</h2>
+        <div id="log"></div>
+      </div>
+
     </div>
-  </div>
-
-  <div class="panel sect">
-    <h2>Calibration &amp; capture</h2>
-    <div class="grid2">
-      <button class="act" onclick="calibStart()"><i data-i="crosshair"></i>Draw lanes</button>
-      <button class="act" onclick="act('calib_auto',{split:'lr'})"><i data-i="scan-line"></i>Auto split</button>
-      <button class="act" onclick="act('snapshot')"><i data-i="image-down"></i>Snapshot</button>
-      <button class="act" onclick="openPorts()"><i data-i="cable"></i>Serial…</button>
-    </div>
-  </div>
-
-  <div class="panel sect">
-    <h2>View &amp; pipeline</h2>
-    <div id="toggles"></div>
-  </div>
-
-  <div class="panel sect">
-    <h2>Tuning</h2>
-    <div id="sliders"></div>
-  </div>
-
-  <div class="panel sect">
-    <h2 style="display:flex;align-items:center;gap:8px"><i data-i="list" style="width:13px;height:13px"></i>Event log</h2>
-    <div id="log"></div>
-  </div>
+  </details>
 </div>
 
 <div class="diag" id="diag"></div>
@@ -300,7 +328,28 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; width:15px;heig
 </div></div>
 
 <script>
-let ICONS={}, S=null, calib=null, lastFrameTs=0;
+let ICONS={}, S=null, calib=null;
+let lastStateTs=null, lastStateChangeAt=Date.now(), imgErrored=false;
+const STATE_STALE_MS=3000;   // generous margin above one frame interval at any sane fps
+
+// A frozen last frame looks exactly like a working feed of a static scene --
+// the most dangerous failure mode here -- so this can't just trust that the
+// video element looks fine. It doesn't: for a multipart/x-mixed-replace
+// MJPEG stream, the browser fires <img>'s 'load' event once, at the very
+// first frame, not on every subsequent part -- measured directly against
+// this dashboard's own live stream, zero 'load' events fired across 4s of
+// genuinely continuous video. So a mid-stream freeze produces no event at
+// all; the img would sit there "successfully loaded" forever. The real
+// signal is the detector's own per-frame timestamp (s.ts) in /api/state: if
+// the backend thread hangs (camera.read() blocking, say), the HTTP server
+// keeps answering 200 OK with the last cached state, so a plain fetch
+// success/failure check (what this used to rely on) doesn't catch it either
+// -- only watching whether ts itself is still advancing does.
+let fetchFailed=false;
+function updateFeedLost(){
+  document.getElementById("feedLost").classList.toggle("show",
+    imgErrored || fetchFailed || (Date.now()-lastStateChangeAt > STATE_STALE_MS));
+}
 let alarmCtx=null, lastSupervisorKey="", personAlarmTimer=null;
 
 // Mute is per-browser (localStorage), not sent to the server: it silences
@@ -333,21 +382,33 @@ function ensureAudio(){
   if(alarmCtx.state==="suspended") alarmCtx.resume().catch(()=>{});
   return alarmCtx;
 }
-function beep(freq,ms,vol){
+// Sine, not square: a square wave is all harsh odd harmonics, which is why
+// the original beep read as an alarm klaxon rather than a notification. A
+// soft attack/decay envelope on the gain matters just as much as the
+// waveform -- switching an oscillator on/off at full volume produces an
+// audible click at both edges no matter what shape the wave is.
+function tone(freq, ms, vol, type){
   if(isMuted()) return;
   const ctx=ensureAudio(); if(!ctx) return;
   const osc=ctx.createOscillator(), gain=ctx.createGain();
-  osc.type="square"; osc.frequency.value=freq;
-  gain.gain.value=vol==null?0.15:vol;
+  osc.type=type||"sine"; osc.frequency.value=freq;
+  const t0=ctx.currentTime, dur=ms/1000, peak=vol==null?0.15:vol;
+  gain.gain.setValueAtTime(0.0001, t0);
+  gain.gain.exponentialRampToValueAtTime(peak, t0+0.015);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0+dur);
   osc.connect(gain).connect(ctx.destination);
-  osc.start(); osc.stop(ctx.currentTime+ms/1000);
+  osc.start(t0); osc.stop(t0+dur+0.02);
 }
+
+let personAlarmHigh=false;
 
 // Supervisor banner: chimes once per NEW alert (edge-triggered on the set of
 // blocked lanes), then stays silently visible until the lane clears -- it is
-// a notification, not an ongoing alarm. Person-in-lane banner repeats an
-// urgent beep on an interval for as long as the condition holds, and clears
-// immediately once the lane is safe or the person leaves.
+// a notification, not an ongoing alarm. Person-in-lane banner repeats a
+// two-tone pattern for as long as the condition holds, and clears
+// immediately once the lane is safe or the person leaves. Its urgency comes
+// from the alternating rhythm, not from harshness -- this one is genuinely
+// safety-critical and needs to stay noticeable, just not unpleasant.
 function updateSafety(s){
   const sup=(s.alerts&&s.alerts.supervisor)||[];
   const supEl=document.getElementById("alertSupervisor");
@@ -357,7 +418,7 @@ function updateSafety(s){
       `<b>LANE ${a.lane}</b> obstruction detected — supervisor notified (${a.since_s}s)`
     ).join(" &nbsp;·&nbsp; ");
     const key=sup.map(a=>a.lane).sort().join(",");
-    if(key!==lastSupervisorKey){ beep(660,180,0.12); setTimeout(()=>beep(880,180,0.12),200); }
+    if(key!==lastSupervisorKey){ tone(880,150,0.11); setTimeout(()=>tone(1175,220,0.11),140); }
     lastSupervisorKey=key;
   } else {
     supEl.classList.remove("show");
@@ -371,8 +432,11 @@ function updateSafety(s){
     document.getElementById("alertPersonText").innerHTML=
       `<b>PERSON ON BLOCKED LANE ${per.join(", ")}</b> — clear the walkway immediately`;
     if(!personAlarmTimer){
-      beep(1046,140,0.18);
-      personAlarmTimer=setInterval(()=>beep(1046,140,0.18),700);
+      personAlarmHigh=false;
+      personAlarmTimer=setInterval(()=>{
+        tone(personAlarmHigh?1318:988, 150, 0.15);
+        personAlarmHigh=!personAlarmHigh;
+      }, 420);
     }
   } else {
     perEl.classList.remove("show");
@@ -625,20 +689,24 @@ function render(s){
     const d=new Date(e.t*1000).toTimeString().slice(0,8);
     return `<div><span class="t num">${d}</span><span class="${e.level}">${e.text}</span></div>`;}).join("");
 
-  lastFrameTs=Date.now();
+  if(s.ts!==lastStateTs){ lastStateTs=s.ts; lastStateChangeAt=Date.now(); }
+  updateFeedLost();
 }
 
-/* A frozen last frame looks exactly like a working feed of a static scene --
-   the most dangerous failure mode here -- so watch the stream explicitly. */
-document.getElementById("feed").addEventListener("error",()=>
-  document.getElementById("feedLost").classList.add("show"));
-document.getElementById("feed").addEventListener("load",()=>
-  document.getElementById("feedLost").classList.remove("show"));
+// Still a real, separate signal worth keeping: the <img> resource itself
+// failing to load at all (bad URL, server down before ever starting).
+// 'load' is deliberately NOT wired here any more -- see updateFeedLost()'s
+// comment above for why it doesn't mean what it sounds like it means.
+document.getElementById("feed").addEventListener("error",()=>{
+  imgErrored=true; updateFeedLost();
+});
 
 async function poll(){
-  try{ render(await (await fetch("/api/state")).json());
-       document.getElementById("feedLost").classList.remove("show"); }
-  catch(e){ document.getElementById("feedLost").classList.add("show"); }
+  try{
+    const s = await (await fetch("/api/state")).json();
+    fetchFailed=false;
+    render(s);
+  } catch(e){ fetchFailed=true; updateFeedLost(); }
 }
 setMuted(isMuted());   // paint the chip's actual starting state, not a blank one
 document.addEventListener("pointerdown", ()=>ensureAudio(), {once:true});
