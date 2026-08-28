@@ -23,6 +23,8 @@ clips/
 snapshots/
 baseline_history/
 replay-*.csv
+# Durable supervisor/alarm event trail -- runtime data, not source.
+alerts.jsonl
 
 # --- Site-specific configuration --------------------------------------------
 # Both are regenerated for wherever the camera is actually mounted:

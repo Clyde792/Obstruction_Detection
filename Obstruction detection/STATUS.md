@@ -72,6 +72,39 @@ from a commanded `'3'`. Greens stay off either way.
 | `replay.py` | Record camera clips and replay them deterministically |
 | `icons.json` | Inline SVG icons (Lucide, ISC licence) — **required by the dashboard** |
 
+### Safety alerts (2026-08-26) — dashboard.py only, not lane_detect.py
+Implements the two notification behaviours from the original design doc that
+weren't built yet: the core "alert supervisory personnel" requirement, and the
+"additional feature" alarm for a worker standing on a blocked walkway.
+
+- **Supervisor alert.** Fires the moment a lane transitions to BLOCKED, stays
+  open (banner + `since` timer) until the lane clears — a standing notification,
+  not a one-off ping, matching "notify them of the situation to clear the
+  obstruction." One chime on new onset, silent while it holds.
+- **Person-on-blocked-lane alarm.** Requires `--no-yolo` to be **off** — there
+  is no other signal in this pipeline that tells a person apart from an
+  obstruction. Uses each YOLO person box's **bottom-centre** (feet), not its
+  centroid — a standing person's box is tall, so the centroid sits over the
+  torso, not where they're actually standing. Debounced both ways
+  (`PERSON_ALARM_CONFIRM_S=0.4` / `RELEASE_S=0.3`) against single-frame YOLO
+  jitter; drops immediately, no debounce, the instant the lane itself clears.
+  Repeating tone while active, flashing banner.
+- Both alarms are **software-only** — beeps via the browser's Web Audio API,
+  not a physical siren. No buzzer has been bought; wiring one would need a
+  free GPIO, and the C3 Super Mini's pins are already fully committed to the
+  8 LEDs. Pending hardware decision, same shape as the LED purchase was.
+- `alerts.jsonl` — durable, append-only, gitignored (site-specific runtime
+  data, like `baseline.png`/`zones.json`). Survives a restart, unlike
+  `self.events` (in-memory, 300-entry ring buffer, still lost on restart —
+  see the small pending items below). One JSON object per line:
+  `{ts, event, lane, text}`, events `supervisor_alert` / `resolved` /
+  `person_alarm`.
+- Verified: `/api/state` → `alerts.supervisor`/`alerts.person` populate
+  correctly on a real BLOCKED transition; `alerts.jsonl` written correctly;
+  both banners and the flash animation confirmed via direct DOM inspection
+  (person-alarm path forced synthetically — no person detector was in frame
+  during this test, so this specific path is UI-verified, not camera-verified).
+
 ### Detection pipeline (in order)
 1. **Photometric alignment** — normalises each frame's brightness/contrast to the
    baseline. Measured: without it a +40% exposure shift produced 44% false change;
@@ -287,8 +320,9 @@ behaviour appears.
 
 ### Running
 ```bat
-.venv\Scripts\python.exe dashboard.py --no-serial --fast     :: dashboard, no hardware
-.venv\Scripts\python.exe dashboard.py --port COM3            :: with the ESP32
+.venv\Scripts\python.exe dashboard.py --fast                 :: dashboard, no hardware (omit --port; there is no --no-serial flag)
+.venv\Scripts\python.exe dashboard.py --port COM3             :: with the ESP32
+.venv\Scripts\python.exe dashboard.py --port COM3 --bind 0.0.0.0   :: viewable from other devices on the LAN, see below
 .venv\Scripts\python.exe lane_detect.py --no-serial --show-mask   :: CLI + mask view
 .venv\Scripts\python.exe replay.py list                      :: recorded clips
 .venv\Scripts\python.exe replay.py run object-A             :: replay one deterministically
@@ -298,6 +332,14 @@ behaviour appears.
 .venv\Scripts\python.exe led_test.py --port COM3 --walk      :: light each pin in turn
 ```
 Dashboard runs at http://127.0.0.1:8000
+
+**Viewing from a second device (phone, another laptop) on the same Wi-Fi:**
+run with `--bind 0.0.0.0`, then browse to `http://<laptop's LAN IP>:8000` from
+the other device. Find the IP with `ipconfig` (look for IPv4 under the active
+Wi-Fi adapter). The first connection may prompt an "Allow this app through
+Windows Firewall" dialog — accept it, or the second device's connection just
+hangs. `127.0.0.1` only ever works on the laptop itself; `0.0.0.0` means
+"listen on every network interface," not a browsable address.
 
 ### Flashing firmware
 ```bat

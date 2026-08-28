@@ -26,8 +26,8 @@ body{
   margin:0; background:var(--page); color:var(--text); font-family:var(--font);
   display:grid; gap:var(--sp-3); padding:var(--sp-3);
   grid-template-columns:minmax(0,3fr) minmax(380px,1.35fr);
-  grid-template-rows:auto auto minmax(0,1fr) auto;
-  grid-template-areas:"head head" "alert alert" "feed side" "diag diag";
+  grid-template-rows:auto auto auto minmax(0,1fr) auto;
+  grid-template-areas:"head head" "safety safety" "alert alert" "feed side" "diag diag";
   overflow:hidden;
 }
 .num{font-family:var(--mono); font-variant-numeric:tabular-nums}
@@ -54,6 +54,24 @@ header h1 svg{width:20px;height:20px;color:var(--info)}
 #alert.show{display:flex}
 #alert svg{width:20px;height:20px;color:var(--confirm);flex:none}
 #alert b{color:var(--text)}
+
+/* ---------- safety banners: supervisor notify + person-in-lane alarm ---------- */
+#safety{grid-area:safety; display:flex; flex-direction:column; gap:var(--sp-2)}
+.safety-banner{display:none; align-items:center; gap:var(--sp-3);
+  padding:var(--sp-3) var(--sp-4); border-radius:var(--r-inner);
+  border:1px solid; font-size:13px}
+.safety-banner.show{display:flex}
+.safety-banner svg{width:20px;height:20px;flex:none}
+.safety-banner b{color:var(--text)}
+#alertSupervisor{background:color-mix(in oklab,var(--confirm) 16%,var(--panel));
+  border-color:color-mix(in oklab,var(--confirm) 55%,var(--border))}
+#alertSupervisor svg{color:var(--confirm)}
+#alertPerson{background:color-mix(in oklab,var(--blocked) 20%,var(--panel));
+  border-color:color-mix(in oklab,var(--blocked) 60%,var(--border));
+  animation:safetyFlash 1s step-start infinite}
+#alertPerson svg{color:var(--blocked)}
+@keyframes safetyFlash{50%{background:color-mix(in oklab,var(--blocked) 42%,var(--panel))}}
+@media (prefers-reduced-motion:reduce){#alertPerson{animation:none}}
 
 /* ---------- feed ---------- */
 .feed{grid-area:feed; position:relative; background:#000; border-radius:var(--r-card);
@@ -208,6 +226,11 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; width:15px;heig
   <span class="chip" id="chipCmd"><i data-i="radio"></i><span>cmd</span></span>
 </header>
 
+<div id="safety">
+  <div class="safety-banner" id="alertSupervisor"><i data-i="triangle-alert"></i><span id="alertSupervisorText"></span></div>
+  <div class="safety-banner" id="alertPerson"><i data-i="zap"></i><span id="alertPersonText"></span></div>
+</div>
+
 <div id="alert"><i data-i="triangle-alert"></i><span id="alertText"></span></div>
 
 <div class="feed">
@@ -276,6 +299,66 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; width:15px;heig
 
 <script>
 let ICONS={}, S=null, calib=null, lastFrameTs=0;
+let alarmCtx=null, lastSupervisorKey="", personAlarmTimer=null;
+
+// Web Audio, not <audio> tags: no asset to ship, and a square-wave beep
+// reads as an alarm rather than a notification chime. Browsers require a
+// user gesture before audio can play -- see the pointerdown listener near
+// the bottom of this script, which unlocks it on the operator's first click
+// so it's ready by the time a real alarm fires.
+function ensureAudio(){
+  if(!alarmCtx){
+    try{ alarmCtx=new (window.AudioContext||window.webkitAudioContext)(); }
+    catch(e){ return null; }
+  }
+  if(alarmCtx.state==="suspended") alarmCtx.resume().catch(()=>{});
+  return alarmCtx;
+}
+function beep(freq,ms,vol){
+  const ctx=ensureAudio(); if(!ctx) return;
+  const osc=ctx.createOscillator(), gain=ctx.createGain();
+  osc.type="square"; osc.frequency.value=freq;
+  gain.gain.value=vol==null?0.15:vol;
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(); osc.stop(ctx.currentTime+ms/1000);
+}
+
+// Supervisor banner: chimes once per NEW alert (edge-triggered on the set of
+// blocked lanes), then stays silently visible until the lane clears -- it is
+// a notification, not an ongoing alarm. Person-in-lane banner repeats an
+// urgent beep on an interval for as long as the condition holds, and clears
+// immediately once the lane is safe or the person leaves.
+function updateSafety(s){
+  const sup=(s.alerts&&s.alerts.supervisor)||[];
+  const supEl=document.getElementById("alertSupervisor");
+  if(sup.length){
+    supEl.classList.add("show");
+    document.getElementById("alertSupervisorText").innerHTML=sup.map(a=>
+      `<b>LANE ${a.lane}</b> obstruction detected — supervisor notified (${a.since_s}s)`
+    ).join(" &nbsp;·&nbsp; ");
+    const key=sup.map(a=>a.lane).sort().join(",");
+    if(key!==lastSupervisorKey){ beep(660,180,0.12); setTimeout(()=>beep(880,180,0.12),200); }
+    lastSupervisorKey=key;
+  } else {
+    supEl.classList.remove("show");
+    lastSupervisorKey="";
+  }
+
+  const per=(s.alerts&&s.alerts.person)||[];
+  const perEl=document.getElementById("alertPerson");
+  if(per.length){
+    perEl.classList.add("show");
+    document.getElementById("alertPersonText").innerHTML=
+      `<b>PERSON ON BLOCKED LANE ${per.join(", ")}</b> — clear the walkway immediately`;
+    if(!personAlarmTimer){
+      beep(1046,140,0.18);
+      personAlarmTimer=setInterval(()=>beep(1046,140,0.18),700);
+    }
+  } else {
+    perEl.classList.remove("show");
+    if(personAlarmTimer){ clearInterval(personAlarmTimer); personAlarmTimer=null; }
+  }
+}
 
 /* Inline SVG (Lucide, ISC) rather than <img> icons: they inherit currentColor,
    so an icon recolours with its lane's state for free, and stay crisp at any
@@ -410,7 +493,10 @@ function laneState(L){return L.blocked?"blocked":(L.occupied||L.credit>0.2)?"con
 function render(s){
   S=s;
   if(s.status!=="running"){document.getElementById("alertText").innerHTML="<b>"+(s.error||s.status)+"</b>";
-    document.getElementById("alert").classList.add("show"); return;}
+    document.getElementById("alert").classList.add("show");
+    updateSafety({}); return;}
+
+  updateSafety(s);
 
   // lanes
   const box=document.getElementById("lanes");
@@ -529,6 +615,7 @@ async function poll(){
        document.getElementById("feedLost").classList.remove("show"); }
   catch(e){ document.getElementById("feedLost").classList.add("show"); }
 }
+document.addEventListener("pointerdown", ()=>ensureAudio(), {once:true});
 fetch("/icons.json").then(r=>r.json()).then(j=>{ICONS=j; paintIcons(); poll(); setInterval(poll,400);});
 window.addEventListener("resize",()=>{if(calib) drawCalib();});
 </script>
