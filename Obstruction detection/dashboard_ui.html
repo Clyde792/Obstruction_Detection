@@ -245,6 +245,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; width:15px;heig
   <span class="chip" id="chipModel"><i data-i="cpu"></i><span>model</span></span>
   <span class="chip" id="chipSerial"><i data-i="cable"></i><span>serial</span></span>
   <span class="chip" id="chipCmd"><i data-i="radio"></i><span>cmd</span></span>
+  <span class="chip" id="chipLed" title="Not the same thing as 'cmd' -- cmd is what the dashboard SENT, this is what the ESP32 itself reports it actually applied. The firmware echoes every command it receives, so a write() that succeeds doesn't get trusted blindly."><i data-i="circle-check"></i><span>LED</span></span>
   <span class="chip" id="chipShift" title="Tracks the lane-boundary corners frame to frame and warps a bumped camera back into alignment automatically. 'shift-safe: off' means no corner_ref.json yet -- recapture the baseline to build one."><i data-i="crosshair"></i><span>shift-safe</span></span>
   <span class="chip" id="chipMute" onclick="toggleMute()" style="cursor:pointer" title="Mutes this browser's alarm beeps only — the banners, the log, and the physical LEDs are unaffected"><i data-i="zap"></i><span>alarm sound</span></span>
 </header>
@@ -630,6 +631,10 @@ function render(s){
   const cc=document.getElementById("chipCmd");
   cc.className="chip "+(s.cmd==="0"?"on":"warn");
   cc.lastElementChild.textContent=`cmd ${s.cmd} · ${s.cmd_text}`;
+  const cl=document.getElementById("chipLed");
+  if(!s.serial){ cl.className="chip off"; cl.lastElementChild.textContent="LED n/a"; }
+  else{ cl.className="chip "+(s.led_confirmed?"on":"warn");
+        cl.lastElementChild.textContent=s.led_confirmed?"LED confirmed":"LED UNCONFIRMED"; }
   const cx=document.getElementById("chipShift");
   cx.className="chip "+(s.shift_correction==="active"?"warn":
                         s.shift_correction==="armed"?"on":"off");

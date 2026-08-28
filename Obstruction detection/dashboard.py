@@ -118,6 +118,7 @@ class Detector(threading.Thread):
         # Runtime handles, created inside run() on the detector thread.
         self.cap = None
         self.ser = None
+        self.echo = ld.SerialEcho()   # confirms the board applied a command, not just that write() succeeded
         self.bs = None
         self.bs_grad = None
         self.model = None
@@ -212,6 +213,7 @@ class Detector(threading.Thread):
         self._serial_disconnect()
         try:
             self.ser = ld.open_serial(port, self.args.baud)
+            self.echo = ld.SerialEcho()   # fresh -- a stale echo from a different board would lie
             self.ser.write(b"3")
             self.ser.flush()
             self.args.port = port
@@ -232,6 +234,7 @@ class Detector(threading.Thread):
             except Exception:
                 pass
             self.ser = None
+            self.echo = ld.SerialEcho()
             self.log("serial disconnected", "warn")
 
     # -- actions -----------------------------------------------------------
@@ -427,6 +430,7 @@ class Detector(threading.Thread):
         started = time.monotonic()
         prev_blocked = {lane: False for lane in self.zones}
         shift_corrected = False
+        led_confirmed_prev = None
 
         while not self.stop_evt.is_set():
             ok, frame = self.cap.read()
@@ -653,6 +657,16 @@ class Detector(threading.Thread):
                     self.log(f"serial write failed: {exc}", "error")
                     self._serial_disconnect()
 
+            # ---- confirm the board actually applied it, don't just trust write() ----
+            led_confirmed, led_detail = True, "no serial"
+            if self.ser is not None:
+                self.echo.poll(self.ser, now)
+                led_confirmed, led_detail = self.echo.status(cmd, now)
+                if led_confirmed != led_confirmed_prev:
+                    led_confirmed_prev = led_confirmed
+                    self.log(f"LED state {'confirmed' if led_confirmed else 'UNCONFIRMED'}: {led_detail}",
+                             "ok" if led_confirmed else "error")
+
             frame_times.append(now)
             fps = ((len(frame_times) - 1)
                    / max(frame_times[-1] - frame_times[0], 1e-6)
@@ -680,6 +694,8 @@ class Detector(threading.Thread):
                                      else "unavailable"),
                 "shadow_px": shadow_px,
                 "serial": self.args.port if self.ser is not None else None,
+                "led_confirmed": led_confirmed,
+                "led_detail": led_detail,
                 "yolo": bool(self.p["use_yolo"] and self.model is not None),
                 "params": dict(self.p),
                 "overrides": dict(self.override),

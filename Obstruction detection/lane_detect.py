@@ -940,6 +940,65 @@ class TrafficMasker:
 # ---------------------------------------------------------------------------
 # Serial
 # ---------------------------------------------------------------------------
+# Confirms the board actually applied a command, rather than trusting that
+# write() succeeded -- a successful write only proves the bytes left the
+# laptop. The firmware prints "ECHO <cmd>" right after it applies each valid
+# '0'-'3', and "ECHO FAULT blink=<0|1>" on every watchdog blink toggle while
+# the link into the board is down -- so this is never blind, even during a
+# fault, because board->host stays live independently of host->board.
+ECHO_STALE_S = 1.0   # generous margin above SEND_INTERVAL / the board's own blink cadence
+
+
+class SerialEcho:
+    """Incrementally parses lines from the ESP32, tracking the last confirmed state.
+
+    poll() is non-blocking and safe to call every frame regardless of
+    whether anything was just sent -- pass it the open serial handle and the
+    current time each iteration.
+    """
+
+    def __init__(self):
+        self._buf = b""
+        self.confirmed_cmd = None    # '0'..'3' or 'FAULT', or None before the first echo
+        self.confirmed_at = None     # time.monotonic() of the last echo received
+
+    def poll(self, ser, now):
+        try:
+            n = ser.in_waiting
+        except OSError:
+            return
+        if n:
+            self._buf += ser.read(n)
+        while b"\n" in self._buf:
+            line, self._buf = self._buf.split(b"\n", 1)
+            self._handle_line(line.decode(errors="replace").strip(), now)
+
+    def _handle_line(self, line, now):
+        if line.startswith("ECHO "):
+            rest = line[5:]
+            if rest[:1] in ("0", "1", "2", "3"):
+                self.confirmed_cmd, self.confirmed_at = rest[0], now
+            elif rest.startswith("FAULT"):
+                self.confirmed_cmd, self.confirmed_at = "FAULT", now
+
+    def status(self, sent_cmd, now):
+        """(confirmed: bool, detail: str), comparing the last echo against
+        what was actually sent. FAULT is never "confirmed", even if the host
+        happens to be sending '3' at that moment -- the board reporting
+        FAULT means it isn't receiving commands at all, which is a strictly
+        worse and different fact than "commanded to show all red"."""
+        if self.confirmed_at is None:
+            return False, "no echo received yet"
+        age = now - self.confirmed_at
+        if age > ECHO_STALE_S:
+            return False, f"echo stale ({age:.1f}s)"
+        if self.confirmed_cmd == "FAULT":
+            return False, "board reports FAULT -- not receiving commands"
+        if self.confirmed_cmd != sent_cmd:
+            return False, f"mismatch: sent {sent_cmd!r}, board confirms {self.confirmed_cmd!r}"
+        return True, "confirmed"
+
+
 def open_serial(port, baud):
     import serial
     # ESP32 boards wire DTR/RTS to EN and GPIO0. pyserial asserts both by
@@ -1115,6 +1174,7 @@ def main():
         lane_areas[lane] = max(int(cv2.countNonZero(m)), 1)
 
     ser = None
+    echo = SerialEcho()
     if not args.no_serial:
         if not args.port:
             raise SystemExit("Give --port, or use --no-serial to test vision only.")
@@ -1138,6 +1198,7 @@ def main():
               for lane in zones}
     stability = {lane: BlobStability(args.stable_frames) for lane in zones}
     last_sent, last_cmd = 0.0, None
+    echo_was_confirmed = None   # None = not printed yet; forces the first console line
     frame_times = []          # rolling window for the on-screen fps counter
     run_start = time.monotonic()
     any_blocked_prev = False   # last frame's state; gates this frame's MOG2 learning
@@ -1266,6 +1327,16 @@ def main():
                 ser.write(cmd.encode())    # resend regularly to feed the watchdog
                 last_cmd, last_sent = cmd, wall
 
+            # ---- confirm the board actually applied it, don't just trust write() ----
+            led_confirmed, led_detail = True, "no serial"
+            if ser:
+                echo.poll(ser, now)
+                led_confirmed, led_detail = echo.status(cmd, now)
+                if led_confirmed != echo_was_confirmed:
+                    echo_was_confirmed = led_confirmed
+                    tag = "[info]" if led_confirmed else "[warn]"
+                    print(f"{tag} LED state {'confirmed' if led_confirmed else 'UNCONFIRMED'}: {led_detail}")
+
             # ---- overlay ----
             # Three tiers, not two. BLOCKED still only latches after the full
             # persistence window -- that decision is unchanged and is what
@@ -1320,7 +1391,10 @@ def main():
             frame = cv2.addWeighted(bar, 0.75, frame, 0.25, 0)
 
             uptime = now - run_start
-            port_txt = f"serial {args.port}" if ser else "no serial (vision only)"
+            if ser:
+                port_txt = f"serial {args.port} [{'confirmed' if led_confirmed else 'UNCONFIRMED'}]"
+            else:
+                port_txt = "no serial (vision only)"
             model_txt = "yolov8n" if model is not None else "diff-only"
             frozen_txt = " [MOG2 FROZEN -- lane blocked]" if any_blocked_prev else ""
             line1 = (f"cmd={cmd}   {port_txt}   model={model_txt}   "
@@ -1329,7 +1403,8 @@ def main():
                     f"decay={args.decay:.1f}  mog-history={args.mog_history}  "
                     f"frame-change {cv2.countNonZero(mask)/mask.size*100:4.1f}%")
             cv2.putText(frame, line1, (10, H - 36),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (255, 255, 255) if led_confirmed else (80, 80, 255), 1)
             cv2.putText(frame, line2, (10, H - 14),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (170, 220, 255), 1)
 

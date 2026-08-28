@@ -343,16 +343,85 @@ Also: `--lock-exposure` exists but isn't being used — auto-exposure turns a lo
 lighting change into a global frame change.
 
 ### 2. Small pending items
-- **No firmware echo** — the dashboard shows *commanded* state, never *confirmed*.
-  Nothing proves the LEDs match the decision.
 - **Event log is in-memory only** (300 entries, lost on restart) — should be JSONL.
-- **`FEED LOST` badge stays visible while the feed is working.** Confirmed live:
-  `/stream.mjpg` decoding fine at 640x480, `img.complete` true, yet the badge is
-  `display:inline; opacity:1`. It is not hidden on recovery. Cosmetic, but a
-  permanent false warning on an operator display trains people to ignore warnings.
+  (`alerts.jsonl` now covers supervisor/person-alarm events durably; the general
+  event log — connects, disconnects, every LED confirm/mismatch — still isn't.)
 - **Calibration canvas fix and modal layout fix** were applied but **never verified
   live** — the dashboard was driven via the HTTP API this session, not by clicking.
 - **Dashboard icons confirmed rendering** (21 SVGs in the DOM) — `icons.json` works.
+
+### Firmware echo — DONE (2026-08-28)
+The dashboard used to show only *commanded* state, never *confirmed* — a write()
+that succeeds proves the bytes left the laptop, nothing more. Firmware now prints
+`ECHO <cmd>` right after applying each valid `'0'`-`'3'`, and `ECHO FAULT
+blink=<0|1>` on every watchdog blink toggle — so confirmation never goes blind,
+even during a fault, because board→host stays live independently of host→board
+(a flaky cable that breaks receive but not transmit now shows up as "board
+reports FAULT", not a confirmation that silently never arrives).
+
+Host side: `SerialEcho` (`lane_detect.py`, shared by both entry points)
+incrementally parses lines, tracks the last confirmed state and its age, and
+`status()` compares it against what was actually sent — mismatch or staleness
+(>1.0s, ~4× the normal ~250ms echo cadence) both read as unconfirmed. New
+dashboard chip "LED confirmed"/"LED UNCONFIRMED"; CLI gets the same in its HUD
+line and console.
+
+Verified on real hardware, not just synthetically: raw serial capture showed
+every command producing its matching `ECHO`, `link up` still firing correctly,
+and — going silent to trigger the watchdog — `FAULT serial silent -> all red`
+followed by a steady `ECHO FAULT blink=0/1` stream, proving the board keeps
+talking even with no commands arriving. Then the full dashboard integration
+caught a **real, unstaged mismatch** during actual operation: the moment a lane
+transitioned to BLOCKED, the log shows `LED state UNCONFIRMED: mismatch: sent
+'1', board confirms '0'` immediately followed by `LED state confirmed:
+confirmed` one poll later — the expected one-round-trip lag between sending a
+new command and its echo arriving, caught and resolved exactly as designed.
+
+### `FEED LOST` badge — real bug found and fixed (2026-08-28)
+Earlier tonight this was reported as "stays visible while the feed works" —
+that was **wrong**, and wrong because of a bug in the *test*, not the dashboard:
+the check had selected the inner `<span>FEED LOST</span>` (which naturally
+defaults to `display:inline`) instead of the actual `#feedLost` div. Corrected
+by testing `document.getElementById('feedLost')` directly.
+
+The real bug underneath: the badge relied on the `<img>`'s `load` event to
+detect stream health, but a `multipart/x-mixed-replace` MJPEG stream fires
+`load` once, at the very first frame, never again — measured directly, zero
+`load` events across 4s of genuinely continuous video. So a true mid-stream
+freeze produced no event at all, and the fallback (checking whether
+`/api/state` fetches succeed) doesn't catch it either, since a hung detector
+thread still leaves the HTTP server answering 200 OK with the last cached
+state. Fixed by watching the one thing that can't lie: whether the detector's
+own per-frame timestamp (`state.ts`) is still advancing between polls.
+Verified with a simulated freeze (repeated identical `ts`): stays hidden for
+one stale poll, fires once staleness passes 3s, clears the instant `ts`
+advances again.
+
+### Dashboard: minimalist layout + softer alarm (2026-08-28)
+Recovery / Calibration / View & pipeline / Tuning / Event log now live inside
+one collapsed-by-default `<details>` disclosure ("Advanced") — nothing
+removed, just deferred one click. Default view is the video and the two lane
+cards. Alarm sound switched from a raw square-wave `beep()` to `tone()`: sine
+wave with a soft attack/decay envelope (the harsh buzz was the waveform; the
+audible click at on/off was the missing envelope). Supervisor alert is a
+gentle two-note chime once per new alert; the person-in-lane alarm keeps its
+urgency from an alternating two-tone rhythm rather than harshness, since that
+one is genuinely safety-critical.
+
+### Multi-device dashboard access + a real access-control bug (2026-08-28)
+`dashboard.py --bind 0.0.0.0` makes the dashboard reachable from any device on
+the same Wi-Fi (phone included) — already existed, just undocumented. Viewing
+(GET) worked immediately; every action button (draw lanes, recapture baseline,
+overrides — all of it) was silently rejected with 403 from any device other
+than the exact machine `dashboard.py` started on. Cause: the origin check
+compared `Origin`/`Host` against a fixed allowlist built from
+`server_address[0]` at bind time, which is literally the string `"0.0.0.0"`
+when bound that way — never matches a real client. Fixed by comparing `Origin`
+to `Host` directly instead, which is also the textbook-correct CSRF check
+(Host reflects what the browser actually addressed the request to, and page
+JS cannot spoof it on a cross-origin request) and fixes LAN control as a side
+effect. Verified both ways: a phone-shaped request now succeeds, a genuine
+cross-origin attacker is still rejected.
 
 ---
 

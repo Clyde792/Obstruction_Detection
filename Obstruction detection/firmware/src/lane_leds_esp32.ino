@@ -19,6 +19,15 @@
  *
  * Fail-safe: no valid command for TIMEOUT_MS -> everything RED, greens off.
  *
+ * Echo: the dashboard used to only know what it had SENT, never what the
+ * board actually DID with it -- a write() that succeeds proves the bytes
+ * left the laptop, not that the LEDs changed. Every valid '0'-'3' now
+ * prints "ECHO <n>" right after applying it, and every fault-blink toggle
+ * prints "ECHO FAULT blink=<0|1>" -- so even while the link INTO the board
+ * is silent (that's the whole fault condition), the board keeps talking
+ * back, and a flaky cable that breaks receive but not transmit is visible
+ * as "board reports FAULT" rather than a confirmation that never arrives.
+ *
  * ---------------------------------------------------------------------------
  * BOARD SETTINGS
  *   Built with PlatformIO: see ../platformio.ini. The two build flags there
@@ -265,10 +274,10 @@ void loop() {
     if (c >= 'a' && c <= 'z') c -= 32;      // accept lower case
 
     switch (c) {
-      case '0': leaveDiag(); setLanes(false, false); break;
-      case '1': leaveDiag(); setLanes(true,  false); break;
-      case '2': leaveDiag(); setLanes(false, true ); break;
-      case '3': leaveDiag(); setLanes(true,  true ); break;
+      case '0': leaveDiag(); setLanes(false, false); Serial.println("ECHO 0"); break;
+      case '1': leaveDiag(); setLanes(true,  false); Serial.println("ECHO 1"); break;
+      case '2': leaveDiag(); setLanes(false, true ); Serial.println("ECHO 2"); break;
+      case '3': leaveDiag(); setLanes(true,  true ); Serial.println("ECHO 3"); break;
       case 'T': selfTest();          valid = false; break;
       case 'X': enterDiag(); allOutputs();
                 Serial.println("diag: all outputs off"); valid = false; break;
@@ -313,6 +322,7 @@ void loop() {
       lastBlink = millis();
       blinkPhase = !blinkPhase;
       allRed(blinkPhase);
+      Serial.printf("ECHO FAULT blink=%d\n", blinkPhase ? 1 : 0);
     }
 #endif
   }
