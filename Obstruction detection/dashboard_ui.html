@@ -224,6 +224,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; width:15px;heig
   <span class="chip" id="chipModel"><i data-i="cpu"></i><span>model</span></span>
   <span class="chip" id="chipSerial"><i data-i="cable"></i><span>serial</span></span>
   <span class="chip" id="chipCmd"><i data-i="radio"></i><span>cmd</span></span>
+  <span class="chip" id="chipShift" title="Tracks the lane-boundary corners frame to frame and warps a bumped camera back into alignment automatically. 'shift-safe: off' means no corner_ref.json yet -- recapture the baseline to build one."><i data-i="crosshair"></i><span>shift-safe</span></span>
+  <span class="chip" id="chipMute" onclick="toggleMute()" style="cursor:pointer" title="Mutes this browser's alarm beeps only — the banners, the log, and the physical LEDs are unaffected"><i data-i="zap"></i><span>alarm sound</span></span>
 </header>
 
 <div id="safety">
@@ -301,6 +303,23 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; width:15px;heig
 let ICONS={}, S=null, calib=null, lastFrameTs=0;
 let alarmCtx=null, lastSupervisorKey="", personAlarmTimer=null;
 
+// Mute is per-browser (localStorage), not sent to the server: it silences
+// what THIS viewer hears, same way the alarm itself was already per-viewer.
+// It never touches the banners, the event/alert log, or the physical LEDs --
+// those stay true to what the detector actually decided. Wrapped in
+// try/catch because a private window or blocked site data can throw on
+// access, and muting must never crash rendering because of that.
+function isMuted(){
+  try{ return localStorage.getItem("alarmMuted")==="1"; }catch(e){ return false; }
+}
+function setMuted(v){
+  try{ localStorage.setItem("alarmMuted", v?"1":"0"); }catch(e){}
+  const chip=document.getElementById("chipMute");
+  chip.className="chip "+(v?"off":"on");
+  chip.lastElementChild.textContent=v?"alarm muted":"alarm sound";
+}
+function toggleMute(){ setMuted(!isMuted()); }
+
 // Web Audio, not <audio> tags: no asset to ship, and a square-wave beep
 // reads as an alarm rather than a notification chime. Browsers require a
 // user gesture before audio can play -- see the pointerdown listener near
@@ -315,6 +334,7 @@ function ensureAudio(){
   return alarmCtx;
 }
 function beep(freq,ms,vol){
+  if(isMuted()) return;
   const ctx=ensureAudio(); if(!ctx) return;
   const osc=ctx.createOscillator(), gain=ctx.createGain();
   osc.type="square"; osc.frequency.value=freq;
@@ -546,6 +566,11 @@ function render(s){
   const cc=document.getElementById("chipCmd");
   cc.className="chip "+(s.cmd==="0"?"on":"warn");
   cc.lastElementChild.textContent=`cmd ${s.cmd} · ${s.cmd_text}`;
+  const cx=document.getElementById("chipShift");
+  cx.className="chip "+(s.shift_correction==="active"?"warn":
+                        s.shift_correction==="armed"?"on":"off");
+  cx.lastElementChild.textContent=s.shift_correction==="active"?"shift correcting":
+                        s.shift_correction==="armed"?"shift-safe":"shift-safe: off";
 
   // alert band
   let msg="";
@@ -615,6 +640,7 @@ async function poll(){
        document.getElementById("feedLost").classList.remove("show"); }
   catch(e){ document.getElementById("feedLost").classList.add("show"); }
 }
+setMuted(isMuted());   // paint the chip's actual starting state, not a blank one
 document.addEventListener("pointerdown", ()=>ensureAudio(), {once:true});
 fetch("/icons.json").then(r=>r.json()).then(j=>{ICONS=j; paintIcons(); poll(); setInterval(poll,400);});
 window.addEventListener("resize",()=>{if(calib) drawCalib();});

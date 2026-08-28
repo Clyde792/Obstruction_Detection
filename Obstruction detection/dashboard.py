@@ -128,6 +128,7 @@ class Detector(threading.Thread):
         self.states = {}
         self.baseline = None
         self.photo_ref = None
+        self.corner_ref = None
         self.size = (ld.FRAME_W, ld.FRAME_H)
 
         # Safety alerts -- see the block after the lane loop in _loop().
@@ -408,6 +409,7 @@ class Detector(threading.Thread):
 
         self.baseline = ld.load_baseline(self.size)
         self.photo_ref = ld.photometric_ref(self.baseline)
+        self.corner_ref = ld.load_corner_reference(self.size)   # None is fine -- correction is optional
         self._load_zones()
         self._seed_model()
 
@@ -424,6 +426,7 @@ class Detector(threading.Thread):
         frame_times = collections.deque(maxlen=30)
         started = time.monotonic()
         prev_blocked = {lane: False for lane in self.zones}
+        shift_corrected = False
 
         while not self.stop_evt.is_set():
             ok, frame = self.cap.read()
@@ -432,6 +435,23 @@ class Detector(threading.Thread):
                 time.sleep(0.3)
                 continue
             now = time.monotonic()
+
+            # ---- camera-shift correction, before anything else touches the
+            # frame -- everything downstream (raw_grey, MOG2, zones, the
+            # video stream itself) then behaves exactly as if the camera
+            # never moved. self.corner_ref is None whenever there's nothing
+            # to track against, so this is a no-op until a baseline recapture
+            # builds one.
+            if self.corner_ref is not None:
+                shift_H = ld.track_shift(self.baseline, self.corner_ref, ld.prep(frame))
+                frame = ld.apply_shift_correction(frame, shift_H)
+                if (shift_H is not None) != shift_corrected:
+                    shift_corrected = shift_H is not None
+                    self.log(f"camera-shift correction "
+                             f"{'engaged' if shift_corrected else 'released'}",
+                             "warn" if shift_corrected else "ok")
+            else:
+                shift_corrected = False
 
             raw_grey = ld.prep(frame)
             grey = (ld.photometric_align(raw_grey, self.photo_ref)
@@ -655,6 +675,9 @@ class Detector(threading.Thread):
                 "raw_shift": round(raw_shift * 100, 1),
                 "aligned_shift": round(aligned_shift * 100, 1),
                 "likely_moved": bool(likely_moved),
+                "shift_correction": ("active" if shift_corrected
+                                     else "armed" if self.corner_ref is not None
+                                     else "unavailable"),
                 "shadow_px": shadow_px,
                 "serial": self.args.port if self.ser is not None else None,
                 "yolo": bool(self.p["use_yolo"] and self.model is not None),
@@ -709,6 +732,14 @@ class Detector(threading.Thread):
             np.stack(self._baseline_frames), axis=0).astype(np.uint8)
         cv2.imwrite(str(ld.BASELINE_FILE), self.baseline)
         self.photo_ref = ld.photometric_ref(self.baseline)
+        # Rebuild the shift-correction reference against this new baseline --
+        # the two must never point at different scenes. self.zones is always
+        # current at this point (recapture is user-triggered, well after init).
+        if ld.build_corner_reference(self.baseline, self.zones):
+            self.corner_ref = ld.load_corner_reference(self.size)
+            self.log("camera-shift correction reference rebuilt", "ok")
+        else:
+            self.corner_ref = None
         self._seed_model()
         for st in self.states.values():
             st.credit, st.blocked, st.last_t = 0.0, False, None
@@ -894,18 +925,32 @@ class Handler(BaseHTTPRequestHandler):
         """Reject cross-origin POSTs.
 
         These endpoints drive a physical traffic signal, and any web page the
-        operator happens to have open can POST to 127.0.0.1 from their browser.
-        Checking Origin/Host costs nothing and closes that door.
+        operator happens to have open can POST to this server from their
+        browser. Checking Origin/Host costs nothing and closes that door.
+
+        Compares Origin to Host rather than to a fixed list of "known"
+        addresses computed at bind time -- that fixed-list approach breaks
+        the instant the server is bound to 0.0.0.0 for LAN access
+        (--bind 0.0.0.0): server_address[0] is then literally the string
+        "0.0.0.0", which never matches a real client's Origin or Host, so
+        every action POST from a phone or any other LAN device was silently
+        rejected while viewing (a plain GET, unchecked) worked fine. Origin
+        vs Host is also the textbook-correct CSRF check: Origin reflects
+        where the request's page/script came from, Host reflects what the
+        browser actually addressed the request to, and a browser will not
+        let page JS spoof Host on a cross-origin request -- so if they
+        match, the request genuinely came from this server's own page,
+        whatever address that page happened to be loaded from.
         """
+        host = (self.headers.get("Host") or "").strip()
         origin = self.headers.get("Origin")
-        if origin:
-            allowed = {f"http://{self.server.server_address[0]}:{self.server.server_address[1]}",
-                       f"http://127.0.0.1:{self.server.server_address[1]}",
-                       f"http://localhost:{self.server.server_address[1]}"}
-            if origin not in allowed:
-                return False
-        host = (self.headers.get("Host") or "").split(":")[0]
-        return host in ("127.0.0.1", "localhost", self.server.server_address[0])
+        if origin is None:
+            # No Origin at all -- not a browser fetch/XHR (those always send
+            # one on a cross-origin-capable request). Likely a script or
+            # curl hitting the API directly; nothing a malicious web page
+            # can forge, so there's no CSRF vector to guard here.
+            return bool(host)
+        return origin == f"http://{host}"
 
     def do_POST(self):
         if not self._origin_ok():

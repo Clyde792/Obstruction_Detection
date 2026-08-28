@@ -259,6 +259,71 @@ silently give up.
   somewhere the live run never looked.
 - **`np.where` → `cv2.threshold`** — 48× faster; fps went 15 → 30.
 
+### Camera-shift correction — line-tracked, no markers (2026-08-28)
+The laptop-lid webcam re-aims itself every time the lid moves, which used to
+mean any bump invalidated `zones.json`/`baseline.png` until a human re-ran
+calibration. This tracks the lane boundary lines *themselves* as the
+reference geometry — no printed markers, no extra hardware, nothing to place.
+Chosen over ArUco markers specifically because the physical board can't host
+them without either taping to the desk (not available) or risking an
+obstruction landing on one (defeats the purpose at the exact moment it
+matters); tracking the boundary avoids both, at the cost of being somewhat
+less robust to occlusion than a real fiducial would be — mitigated, not
+solved, by tracking every corner of both lanes rather than just a few.
+
+**How it works** — `lane_detect.py`: `build_corner_reference()` /
+`load_corner_reference()` / `track_shift()` / `apply_shift_correction()`.
+- Every corner of every lane polygon gets snapped onto the real feature
+  under it (`cv2.goodFeaturesToTrack` + `cornerSubPix` in a small window)
+  once, whenever `baseline.png` is (re)captured — CLI `--baseline` and the
+  dashboard's baseline recapture both rebuild `corner_ref.json` so the two
+  files can never point at different scenes.
+- Every live frame, `cv2.calcOpticalFlowPyrLK` re-finds those same corners
+  against the *saved reference frame* (never the previous live frame, so
+  tracking error cannot accumulate across a session), a homography is fit
+  RANSAC-style, and the frame is warped back into calibrated geometry
+  *before* anything else touches it — MOG2, the gradient channel, zones,
+  the baseline diff, the video stream itself all then behave exactly as if
+  the camera never moved. Single insertion point, right after `cap.read()`.
+- Deliberately conservative: any time it can't track confidently it warps
+  nothing and hands back the raw frame, and the existing `scene_shift()` /
+  `SHIFT_ALARM` / `likely_moved` path is still there underneath as the
+  fallback for a shift too large or too occluded to recover from alone.
+
+**A real bug caught by its own test suite, not by inspection**: the first
+version trusted `cv2.calcOpticalFlowPyrLK`'s status flag alone. Status only
+means "converged", not "converged onto something real" — fed pure noise in
+testing, every point still reported `status=1` with a plausible-looking
+homography behind it. LK's own per-point match error was the actual signal
+(measured: ~3.5 for a real match, ~70+ for noise) and wasn't being read at
+all. Fixed by filtering on it (`LK_MAX_ERR = 20.0`).
+
+**Verified** — synthetic (a rendered scene + a *known* injected
+rotation/scale/translation, so ground truth is exact):
+- A real shift: 77% reduction in mean pixel error after correction.
+- Zero shift: correctly returns near-identity, no spurious drift.
+- Pure noise: correctly returns no correction (the bug above, now fixed).
+- A shift too large for the tracker's window to bridge: correctly gives up
+  rather than guessing, leaving the existing fallback in charge.
+- One lane's corners fully blacked out (simulated occlusion): still
+  recovers a valid homography from the other lane alone.
+
+Verified live against the real camera and pipeline (not synthetic): a real
+baseline recapture builds `corner_ref.json` correctly, `/api/state`'s new
+`shift_correction` field transitions `unavailable → armed` exactly on that
+recapture, and fps is unaffected (16.6 fps measured identically with and
+without a reference loaded — the per-frame cost, 8 tracked points, is
+negligible next to MOG2/YOLO).
+
+**Not yet verified**: an actual physical bump of the real camera, because
+the real board doesn't exist yet — only a paper mockup with no drawn
+boundary lines to track. This needs a live pass once the cardboard board
+(with its lane lines actually drawn) is built: recapture baseline, gently
+nudge the camera, and confirm `shift_correction` shows `active` and
+detection keeps working through it. `markers/` (ArUco fallback, generated
+but unused) still sits in the repo (gitignored) in case line-tracking
+proves too fragile on the real board's specific contrast/lighting.
+
 ---
 
 ## PENDING
