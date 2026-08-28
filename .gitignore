@@ -23,14 +23,18 @@ clips/
 snapshots/
 baseline_history/
 replay-*.csv
+# Durable supervisor/alarm event trail -- runtime data, not source.
+alerts.jsonl
 
 # --- Site-specific configuration --------------------------------------------
-# Both are regenerated for wherever the camera is actually mounted:
+# All three are regenerated for wherever the camera is actually mounted:
 #   python lane_detect.py --calibrate   -> zones.json
-#   python lane_detect.py --baseline    -> baseline.png
-# Delete these two lines if you'd rather keep your own calibration in the repo.
+#   python lane_detect.py --baseline    -> baseline.png, corner_ref.json
+# Delete these lines if you'd rather keep your own calibration in the repo.
 baseline.png
 zones.json
+corner_ref.json
+markers/
 
 # --- Scratch ----------------------------------------------------------------
 *.orig

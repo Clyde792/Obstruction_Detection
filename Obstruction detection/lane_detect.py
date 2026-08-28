@@ -461,6 +461,153 @@ def photometric_align(grey, ref):
 
 
 # ---------------------------------------------------------------------------
+# Camera-shift correction -- track the lane corners themselves
+# ---------------------------------------------------------------------------
+# No markers, no extra hardware. A drawn lane boundary is already a strong,
+# high-contrast corner: the four points clicked (or auto-split) in
+# --calibrate double as tracking points. Every frame, this re-finds where
+# those same corners are NOW and warps the frame back into the geometry
+# baseline.png and zones.json were built against, so a bumped camera never
+# has to mean a bad detection -- the rest of the pipeline never learns
+# anything moved.
+#
+# Deliberately conservative: any time it can't track confidently, it does
+# nothing and hands back the frame untouched. A bad warp is worse than no
+# warp, and scene_shift()/SHIFT_ALARM (see dashboard.py/this file's main
+# loop) is still there underneath as the fallback for a shift too large, or
+# too occluded, for this to recover from on its own.
+#
+# Weaker than a dedicated fiducial (ArUco etc.) in one specific way: a real
+# obstruction can end up sitting on the very boundary line being tracked,
+# which a printed marker with built-in error correction would tolerate and
+# a bare line intersection cannot. Mitigated, not solved, by tracking every
+# corner of both lanes (up to 8 points) rather than just 4 -- losing one or
+# two to occlusion still usually leaves enough for a homography.
+CORNER_REF_FILE = HERE / "corner_ref.json"
+CORNER_SEARCH_RADIUS = 25        # px window used to snap a clicked corner onto the real feature under it
+LK_WIN = (31, 31)
+LK_MAX_LEVEL = 3
+LK_CRITERIA = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
+# LK's own status flag is not enough on its own: it reports "converged", not
+# "converged onto something real". Fed pure noise in testing, every point
+# still reported status=1 with a plausible-looking homography behind it --
+# status alone was insufficient. Its per-point match error (patch SSD) is
+# what actually separates the two cases, measured cleanly on this test rig:
+# a real match reads ~3.5, feeding it noise reads ~70+. 20 sits with wide
+# margin on either side.
+LK_MAX_ERR = 20.0
+MIN_TRACKED_FOR_HOMOGRAPHY = 4    # a homography needs 4; up to 8 lane corners gives room to lose some
+RANSAC_REPROJ_PX = 6.0
+MAX_WARP_DRIFT_FRAMES = 3.0       # sanity clamp, in multiples of max(w,h) -- rejects a degenerate fit
+
+
+def _snap_corner(grey, x, y, radius=CORNER_SEARCH_RADIUS):
+    """Pull a rough point onto the strongest real corner under it.
+
+    Used once, at reference-build time, so a slightly-off clicked corner (or
+    an auto-split one, which is never ON a real feature at all) snaps onto
+    the actual line intersection instead of tracking blank cardboard beside it.
+    """
+    h, w = grey.shape
+    x0, y0 = max(int(x - radius), 0), max(int(y - radius), 0)
+    x1, y1 = min(int(x + radius), w), min(int(y + radius), h)
+    crop = grey[y0:y1, x0:x1]
+    if crop.size == 0:
+        return float(x), float(y)
+    pts = cv2.goodFeaturesToTrack(crop, maxCorners=1, qualityLevel=0.1, minDistance=5)
+    if pts is None:
+        return float(x), float(y)   # no local feature found -- fall back to the raw click
+    cv2.cornerSubPix(crop, pts, (5, 5), (-1, -1), LK_CRITERIA)
+    return float(pts[0, 0, 0] + x0), float(pts[0, 0, 1] + y0)
+
+
+def build_corner_reference(grey_baseline, zones):
+    """(Re)build corner_ref.json from the lane polygons and a matching baseline.
+
+    Call this every time baseline.png is (re)captured -- CLI --baseline and
+    the dashboard's baseline recapture both do -- so the reference frame the
+    tracker compares against can never drift out of sync with the baseline
+    the rest of the pipeline is using.
+    """
+    points = []
+    for _lane, poly in sorted(zones.items()):
+        for (x, y) in poly:
+            points.append(list(_snap_corner(grey_baseline, x, y)))
+    if len(points) < MIN_TRACKED_FOR_HOMOGRAPHY:
+        return False   # no zones, or too few points -- nothing to track from
+    h, w = grey_baseline.shape
+    CORNER_REF_FILE.write_text(json.dumps(
+        {"_meta": {"width": w, "height": h}, "points": points}, indent=2))
+    return True
+
+
+def load_corner_reference(size):
+    """None if there's no usable reference -- correction is optional, never required."""
+    if not CORNER_REF_FILE.exists():
+        return None
+    try:
+        raw = json.loads(CORNER_REF_FILE.read_text())
+        meta = raw["_meta"]
+        if (meta["width"], meta["height"]) != size:
+            return None   # stale resolution; behave as if there were no reference
+        pts = np.array(raw["points"], dtype=np.float32).reshape(-1, 1, 2)
+    except (KeyError, ValueError, json.JSONDecodeError):
+        return None
+    if len(pts) < MIN_TRACKED_FOR_HOMOGRAPHY:
+        return None
+    return pts
+
+
+def track_shift(ref_grey, ref_points, cur_grey):
+    """Where did the reference corners go in the current frame?
+
+    Returns a homography that maps the CURRENT frame onto the geometry
+    baseline.png/zones.json were built against, or None if too few points
+    tracked confidently (or the fit looks degenerate) to trust the result.
+
+    Always tracks directly against the saved reference frame, never against
+    the previous live frame -- so tracking error can never accumulate across
+    a long-running session the way frame-to-frame tracking would.
+    """
+    cur_points, status, err = cv2.calcOpticalFlowPyrLK(
+        ref_grey, cur_grey, ref_points, None,
+        winSize=LK_WIN, maxLevel=LK_MAX_LEVEL, criteria=LK_CRITERIA)
+    if cur_points is None:
+        return None
+    # Both conditions matter: status==1 only means "converged", not
+    # "converged onto something real" -- see LK_MAX_ERR above.
+    ok = status.reshape(-1).astype(bool) & (err.reshape(-1) < LK_MAX_ERR)
+    if int(ok.sum()) < MIN_TRACKED_FOR_HOMOGRAPHY:
+        return None
+
+    H, inliers = cv2.findHomography(cur_points[ok], ref_points[ok],
+                                    cv2.RANSAC, RANSAC_REPROJ_PX)
+    if H is None or inliers is None or int(inliers.sum()) < MIN_TRACKED_FOR_HOMOGRAPHY:
+        return None
+
+    # Reject a wild/degenerate fit rather than trust it blind: a real bump
+    # moves the frame's own corners by some sane fraction of the frame; a
+    # bad homography fitted from too little real structure can fling them
+    # anywhere, and warping by THAT would manufacture a worse problem than
+    # the shift it was meant to fix.
+    h, w = ref_grey.shape
+    frame_corners = np.array([[0, 0], [w, 0], [w, h], [0, h]],
+                             np.float32).reshape(-1, 1, 2)
+    warped = cv2.perspectiveTransform(frame_corners, H)
+    if np.any(np.abs(warped.reshape(-1, 2)) > MAX_WARP_DRIFT_FRAMES * max(w, h)):
+        return None
+    return H
+
+
+def apply_shift_correction(frame, H):
+    """No-op if H is None -- the caller already decided not to trust it."""
+    if H is None:
+        return frame
+    h, w = frame.shape[:2]
+    return cv2.warpPerspective(frame, H, (w, h), borderMode=cv2.BORDER_REPLICATE)
+
+
+# ---------------------------------------------------------------------------
 # Calibration
 # ---------------------------------------------------------------------------
 def calibrate(args):
@@ -663,6 +810,15 @@ def capture_baseline(args, count=90):
     baseline = np.median(np.stack(stack), axis=0).astype(np.uint8)
     cv2.imwrite(str(BASELINE_FILE), baseline)
     print(f"Saved {BASELINE_FILE.resolve()}")
+
+    # Rebuild the shift-correction reference against this new baseline, so
+    # the two can never point at different scenes. Silently skipped if there
+    # is no zones.json yet -- shift correction is optional, not required.
+    if ZONES_FILE.exists():
+        zones = load_zones((baseline.shape[1], baseline.shape[0]))
+        if build_corner_reference(baseline, zones):
+            print(f"Saved {CORNER_REF_FILE.resolve()} "
+                  f"(camera-shift correction reference)")
 
 
 def load_baseline(size):
@@ -907,6 +1063,10 @@ def main():
     zones = load_zones(size)
     baseline = load_baseline(size)
     photo_ref = photometric_ref(baseline)
+    corner_ref = load_corner_reference(size)
+    print("camera-shift correction: " +
+          ("armed" if corner_ref is not None
+           else "off (no corner_ref.json -- re-run --baseline to build one)"))
 
     # ---- background model: MOG2, seeded from the captured baseline ----
     # A repeated moderate-learning-rate seed converges the model to "this is
@@ -993,12 +1153,25 @@ def main():
     if args.fast:
         print("  --fast preset active: tuned for tabletop testing, NOT for "
               "real traffic")
+    was_corrected = False
     try:
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
             now = time.monotonic()
+
+            # ---- camera-shift correction, before anything else touches the
+            # frame -- everything downstream (grey, MOG2, zones, display)
+            # then behaves exactly as if the camera never moved.
+            if corner_ref is not None:
+                shift_H = track_shift(baseline, corner_ref, prep(frame))
+                frame = apply_shift_correction(frame, shift_H)
+                if (shift_H is not None) != was_corrected:
+                    was_corrected = shift_H is not None
+                    print(f"[info] camera-shift correction "
+                          f"{'engaged' if was_corrected else 'released'}")
+
             grey = prep(frame)
             if not args.no_photometric:
                 grey = photometric_align(grey, photo_ref)

@@ -35,6 +35,14 @@ HERE = Path(__file__).resolve().parent
 UI_FILE = HERE / "dashboard_ui.html"
 ICONS_FILE = HERE / "icons.json"
 SNAPSHOT_DIR = HERE / "snapshots"
+ALERT_LOG = HERE / "alerts.jsonl"
+
+# ---- safety alarm: person standing on a lane that is currently BLOCKED ----
+# Requires --port... no, requires YOLO (--no-yolo disables it, since it has
+# no other way to tell a person from an obstruction). Debounced both ways so
+# a single dropped/jittery YOLO frame doesn't chatter the alarm.
+PERSON_ALARM_CONFIRM_S = 0.4   # sustained overlap before the alarm latches
+PERSON_ALARM_RELEASE_S = 0.3   # sustained clear before the alarm drops
 
 # Streaming is decoupled from detection: the detector runs as fast as it can,
 # the MJPEG stream samples the newest finished frame. A slow browser therefore
@@ -120,7 +128,14 @@ class Detector(threading.Thread):
         self.states = {}
         self.baseline = None
         self.photo_ref = None
+        self.corner_ref = None
         self.size = (ld.FRAME_W, ld.FRAME_H)
+
+        # Safety alerts -- see the block after the lane loop in _loop().
+        self.supervisor_alert = {}     # lane -> {"since": monotonic, "text": str}
+        self.person_since = {}         # lane -> monotonic overlap started, or None
+        self.person_clear_since = {}   # lane -> monotonic overlap stopped, or None
+        self.person_alarm_active = {}  # lane -> bool, latched after debounce
 
         # Baseline recapture runs across successive frames rather than blocking
         # the loop for ~6s, which would starve the serial watchdog keep-alive.
@@ -332,6 +347,17 @@ class Detector(threading.Thread):
         cv2.imwrite(str(SNAPSHOT_DIR / name), frame)
         self.log(f"snapshot saved: {name}", "ok")
 
+    def _append_alert_log(self, event, lane, text):
+        """Durable trail of block/alarm/resolve events -- survives a restart,
+        unlike self.events (in-memory, 300-entry ring buffer). One JSON object
+        per line so it can be tailed or grepped without parsing the whole file."""
+        rec = {"ts": time.time(), "event": event, "lane": lane, "text": text}
+        try:
+            with open(ALERT_LOG, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec) + "\n")
+        except OSError as exc:
+            self.log(f"alert log write failed: {exc}", "warn")
+
     def _apply_calibration(self, params):
         """Lane polygons clicked in the browser, in normalised 0-1 coords."""
         lanes = params.get("lanes") or {}
@@ -383,6 +409,7 @@ class Detector(threading.Thread):
 
         self.baseline = ld.load_baseline(self.size)
         self.photo_ref = ld.photometric_ref(self.baseline)
+        self.corner_ref = ld.load_corner_reference(self.size)   # None is fine -- correction is optional
         self._load_zones()
         self._seed_model()
 
@@ -399,6 +426,7 @@ class Detector(threading.Thread):
         frame_times = collections.deque(maxlen=30)
         started = time.monotonic()
         prev_blocked = {lane: False for lane in self.zones}
+        shift_corrected = False
 
         while not self.stop_evt.is_set():
             ok, frame = self.cap.read()
@@ -407,6 +435,23 @@ class Detector(threading.Thread):
                 time.sleep(0.3)
                 continue
             now = time.monotonic()
+
+            # ---- camera-shift correction, before anything else touches the
+            # frame -- everything downstream (raw_grey, MOG2, zones, the
+            # video stream itself) then behaves exactly as if the camera
+            # never moved. self.corner_ref is None whenever there's nothing
+            # to track against, so this is a no-op until a baseline recapture
+            # builds one.
+            if self.corner_ref is not None:
+                shift_H = ld.track_shift(self.baseline, self.corner_ref, ld.prep(frame))
+                frame = ld.apply_shift_correction(frame, shift_H)
+                if (shift_H is not None) != shift_corrected:
+                    shift_corrected = shift_H is not None
+                    self.log(f"camera-shift correction "
+                             f"{'engaged' if shift_corrected else 'released'}",
+                             "warn" if shift_corrected else "ok")
+            else:
+                shift_corrected = False
 
             raw_grey = ld.prep(frame)
             grey = (ld.photometric_align(raw_grey, self.photo_ref)
@@ -504,11 +549,67 @@ class Detector(threading.Thread):
                 if final and not prev_blocked[lane]:
                     self.log(f"LANE {lane} BLOCKED (blob {blob}px vs {int(need)}px)",
                              "error")
+                    # "Supervisor alert" per the design doc: stays open until
+                    # the lane clears, not a one-off ping. _append_alert_log
+                    # is the durable trail; self.log is the live UI feed.
+                    self.supervisor_alert[lane] = {"since": now,
+                        "text": f"Lane {lane} obstruction detected"}
+                    self._append_alert_log("supervisor_alert", lane,
+                        f"blob {blob}px vs need {int(need)}px")
                     if self.args.snapshot_on_block:
                         self._save_snapshot(frame, f"lane{lane}-blocked")
                 elif prev_blocked[lane] and not final:
                     self.log(f"LANE {lane} cleared", "ok")
+                    if self.supervisor_alert.pop(lane, None) is not None:
+                        self._append_alert_log("resolved", lane,
+                            "obstruction cleared")
                 prev_blocked[lane] = final
+
+            # ---- person-on-blocked-lane alarm --------------------------
+            # PDF's "additional feature": alarm if a worker enters the lane
+            # that's currently red. Uses the box's bottom-centre (feet), not
+            # its centroid -- a standing person's box is tall, so the
+            # centroid sits over the torso, not where they're actually
+            # standing. Silently inert without YOLO (--no-yolo): there is no
+            # other signal in this pipeline that distinguishes a person from
+            # an obstruction.
+            persons_in = set()
+            for (x1, y1, x2, y2, cls, conf, excused) in drawn:
+                if cls != "person":
+                    continue
+                fx, fy = int((x1 + x2) / 2), int(y2)
+                for lane in self.zones:
+                    if not blocked[lane]:
+                        continue
+                    m = self.lane_masks[lane]
+                    if 0 <= fy < m.shape[0] and 0 <= fx < m.shape[1] and m[fy, fx]:
+                        persons_in.add(lane)
+
+            for lane in self.zones:
+                if lane in persons_in:
+                    self.person_clear_since[lane] = None
+                    if self.person_since.get(lane) is None:
+                        self.person_since[lane] = now
+                    if (not self.person_alarm_active.get(lane)
+                            and now - self.person_since[lane] >= PERSON_ALARM_CONFIRM_S):
+                        self.person_alarm_active[lane] = True
+                        self.log(f"ALARM: person on BLOCKED lane {lane}", "error")
+                        self._append_alert_log("person_alarm", lane,
+                            "person entered blocked lane")
+                else:
+                    self.person_since[lane] = None
+                    if not self.person_alarm_active.get(lane):
+                        continue
+                    if not blocked[lane]:
+                        # danger context is gone -- drop it now, no debounce
+                        self.person_alarm_active[lane] = False
+                        self.person_clear_since[lane] = None
+                    elif self.person_clear_since.get(lane) is None:
+                        self.person_clear_since[lane] = now
+                    elif now - self.person_clear_since[lane] >= PERSON_ALARM_RELEASE_S:
+                        self.person_alarm_active[lane] = False
+                        self.person_clear_since[lane] = None
+                        self.log(f"alarm cleared: lane {lane}", "ok")
 
             any_blocked_prev = any(blocked.values())
             raw_occ_prev = {lane: lanes_out[lane]["occupied"] for lane in self.zones}
@@ -574,6 +675,9 @@ class Detector(threading.Thread):
                 "raw_shift": round(raw_shift * 100, 1),
                 "aligned_shift": round(aligned_shift * 100, 1),
                 "likely_moved": bool(likely_moved),
+                "shift_correction": ("active" if shift_corrected
+                                     else "armed" if self.corner_ref is not None
+                                     else "unavailable"),
                 "shadow_px": shadow_px,
                 "serial": self.args.port if self.ser is not None else None,
                 "yolo": bool(self.p["use_yolo"] and self.model is not None),
@@ -583,6 +687,15 @@ class Detector(threading.Thread):
                                      for k, v in self.override_until.items()},
                 "baseline_progress": (len(self._baseline_frames)
                                       if self._baseline_frames is not None else None),
+                "alerts": {
+                    "supervisor": [
+                        {"lane": lane, "text": info["text"],
+                         "since_s": round(now - info["since"], 1)}
+                        for lane, info in sorted(self.supervisor_alert.items())
+                    ],
+                    "person": sorted(lane for lane in self.zones
+                                     if self.person_alarm_active.get(lane)),
+                },
                 "size": list(self.size),
                 "ts": wall,
             }
@@ -619,6 +732,14 @@ class Detector(threading.Thread):
             np.stack(self._baseline_frames), axis=0).astype(np.uint8)
         cv2.imwrite(str(ld.BASELINE_FILE), self.baseline)
         self.photo_ref = ld.photometric_ref(self.baseline)
+        # Rebuild the shift-correction reference against this new baseline --
+        # the two must never point at different scenes. self.zones is always
+        # current at this point (recapture is user-triggered, well after init).
+        if ld.build_corner_reference(self.baseline, self.zones):
+            self.corner_ref = ld.load_corner_reference(self.size)
+            self.log("camera-shift correction reference rebuilt", "ok")
+        else:
+            self.corner_ref = None
         self._seed_model()
         for st in self.states.values():
             st.credit, st.blocked, st.last_t = 0.0, False, None
@@ -804,18 +925,32 @@ class Handler(BaseHTTPRequestHandler):
         """Reject cross-origin POSTs.
 
         These endpoints drive a physical traffic signal, and any web page the
-        operator happens to have open can POST to 127.0.0.1 from their browser.
-        Checking Origin/Host costs nothing and closes that door.
+        operator happens to have open can POST to this server from their
+        browser. Checking Origin/Host costs nothing and closes that door.
+
+        Compares Origin to Host rather than to a fixed list of "known"
+        addresses computed at bind time -- that fixed-list approach breaks
+        the instant the server is bound to 0.0.0.0 for LAN access
+        (--bind 0.0.0.0): server_address[0] is then literally the string
+        "0.0.0.0", which never matches a real client's Origin or Host, so
+        every action POST from a phone or any other LAN device was silently
+        rejected while viewing (a plain GET, unchecked) worked fine. Origin
+        vs Host is also the textbook-correct CSRF check: Origin reflects
+        where the request's page/script came from, Host reflects what the
+        browser actually addressed the request to, and a browser will not
+        let page JS spoof Host on a cross-origin request -- so if they
+        match, the request genuinely came from this server's own page,
+        whatever address that page happened to be loaded from.
         """
+        host = (self.headers.get("Host") or "").strip()
         origin = self.headers.get("Origin")
-        if origin:
-            allowed = {f"http://{self.server.server_address[0]}:{self.server.server_address[1]}",
-                       f"http://127.0.0.1:{self.server.server_address[1]}",
-                       f"http://localhost:{self.server.server_address[1]}"}
-            if origin not in allowed:
-                return False
-        host = (self.headers.get("Host") or "").split(":")[0]
-        return host in ("127.0.0.1", "localhost", self.server.server_address[0])
+        if origin is None:
+            # No Origin at all -- not a browser fetch/XHR (those always send
+            # one on a cross-origin-capable request). Likely a script or
+            # curl hitting the API directly; nothing a malicious web page
+            # can forge, so there's no CSRF vector to guard here.
+            return bool(host)
+        return origin == f"http://{host}"
 
     def do_POST(self):
         if not self._origin_ok():
