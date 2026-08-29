@@ -383,18 +383,6 @@ input[type=range]:focus-visible{outline:2px solid var(--info); outline-offset:4p
 .tile.alarm .v{color:var(--blocked)}
 .tile.alarm{background:color-mix(in oklab,var(--blocked) 10%,transparent)}
 
-/* ---------- log ---------- */
-#log{max-height:200px; overflow-y:auto; font-size:var(--fs-sm); margin:0 calc(var(--sp-4) * -1);
-  padding:0 var(--sp-4); scrollbar-width:thin; scrollbar-color:var(--border) transparent}
-#log::-webkit-scrollbar{width:9px}
-#log::-webkit-scrollbar-thumb{background:var(--border); border-radius:5px;
-  border:2px solid var(--panel)}
-#log div{display:flex; gap:var(--sp-3); padding:5px 0; border-bottom:1px solid var(--border-soft)}
-#log div:last-child{border-bottom:0}
-#log .t{color:var(--text-mute); flex:none; font-size:var(--fs-lbl)}
-#log .info{color:var(--text-2)} #log .ok{color:var(--clear)}
-#log .warn{color:var(--confirm)} #log .error{color:var(--blocked); font-weight:600}
-
 /* ---------- modal ---------- */
 #modal{position:fixed; inset:0; background:rgba(4,6,10,.82); backdrop-filter:blur(3px);
   display:none; align-items:center; justify-content:center; z-index:50; padding:var(--sp-4)}
@@ -563,11 +551,6 @@ input[type=range]:focus-visible{outline:2px solid var(--info); outline-offset:4p
       <div class="sect">
         <h2>Tuning</h2>
         <div id="sliders"></div>
-      </div>
-
-      <div class="sect">
-        <h2 style="display:flex;align-items:center;gap:8px"><i data-i="list" style="width:13px;height:13px"></i>Event log</h2>
-        <div id="log"></div>
       </div>
 
     </div>
@@ -957,10 +940,8 @@ function render(s){
       document.getElementById("sv_"+k).textContent=s.params[k]+(k==="blob_px"?"px":"s");}
   });
 
-  // log
-  document.getElementById("log").innerHTML=(s.events||[]).map(e=>{
-    const d=new Date(e.t*1000).toTimeString().slice(0,8);
-    return `<div><span class="t num">${d}</span><span class="${e.level}">${e.text}</span></div>`;}).join("");
+  // Event log UI removed -- s.events still arrives from the backend (harmless,
+  // and still readable via /api/state directly) but nothing renders it any more.
 
   if(s.ts!==lastStateTs){ lastStateTs=s.ts; lastStateChangeAt=Date.now(); }
   updateFeedLost();
