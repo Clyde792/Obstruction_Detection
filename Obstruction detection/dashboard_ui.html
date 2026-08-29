@@ -9,69 +9,162 @@
    pair measures ~4.1 perceptual distance under deuteranopia -- effectively
    indistinguishable. Shifting green toward teal raises that to ~12.8 while
    still reading unmistakably as "green" to normal vision. The ESP32's actual
-   LEDs stay red/green; only the screen compensates. */
+   LEDs stay red/green; only the screen compensates.
+
+   Retuned, same reasoning: the page/panel steps were darkened and separated
+   so the three status hues sit on a quieter ground and win the eye by
+   themselves rather than competing with panel chrome. Hue angles are
+   unchanged (teal / amber / red-orange), only chroma and lightness moved. */
 :root{
-  --page:#0A0E14; --panel:#131A24; --inset:#0E141C;
-  --border:#26313F; --border-soft:#1C2531;
-  --text:#E8EDF4; --text-2:#9FADC0; --text-mute:#6B7889;
-  --clear:#00D18F; --confirm:#F5A524; --blocked:#F0443A; --info:#4C9AFF;
-  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px;
-  --r-chip:6px; --r-inner:8px; --r-card:12px; --r-pill:999px;
+  /* surfaces: 4 steps, each a clear stop -- page < panel < raised < inset */
+  --page:#070A0F; --panel:#0F151E; --raised:#151D28; --inset:#0A0F16;
+  --border:#232E3D; --border-soft:#19212C; --border-strong:#31404F;
+
+  /* text: 4 steps, used strictly by rank -- primary value, label, muted */
+  --text:#EAEFF6; --text-2:#9CAABE; --text-mute:#65727F;
+
+  /* status. --blocked is the single most saturated thing on the page, on
+     purpose: nothing else is allowed to compete with it. */
+  --clear:#12D18C; --confirm:#FFB020; --blocked:#FF4438; --info:#5B9DFF;
+
+  /* spacing: 4px base, no in-between values anywhere */
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px; --sp-6:32px;
+
+  /* type scale */
+  --fs-micro:10px; --fs-lbl:11px; --fs-sm:12px; --fs-base:13px;
+  --fs-md:15px; --fs-lg:18px; --fs-xl:22px;
+
+  --r-chip:7px; --r-inner:9px; --r-card:13px; --r-pill:999px;
   --font:system-ui,-apple-system,"Segoe UI",sans-serif;
-  --mono:ui-monospace,"Cascadia Mono",Consolas,monospace;
+  --mono:ui-monospace,"Cascadia Mono","SF Mono",Consolas,monospace;
+
+  /* one shared easing + duration so every transition on the page agrees */
+  --ease:cubic-bezier(.2,.7,.3,1); --dur:150ms;
+
+  /* minimum comfortable hit target; raised on coarse pointers further down */
+  --hit:38px;
 }
 *{box-sizing:border-box}
 html,body{height:100%}
 body{
   margin:0; background:var(--page); color:var(--text); font-family:var(--font);
+  font-size:var(--fs-base); line-height:1.45; -webkit-font-smoothing:antialiased;
   display:grid; gap:var(--sp-3); padding:var(--sp-3);
   grid-template-columns:minmax(0,3fr) minmax(380px,1.35fr);
   grid-template-rows:auto auto auto minmax(0,1fr) auto;
   grid-template-areas:"head head" "safety safety" "alert alert" "feed side" "diag diag";
   overflow:hidden;
 }
-.num{font-family:var(--mono); font-variant-numeric:tabular-nums}
+.num{font-family:var(--mono); font-variant-numeric:tabular-nums; letter-spacing:-.01em}
 .panel{background:var(--panel); border:1px solid var(--border); border-radius:var(--r-card)}
-.lbl{font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--text-mute)}
+/* the single label style used for every field name on the page */
+.lbl{font-size:var(--fs-lbl); font-weight:700; letter-spacing:.09em;
+  text-transform:uppercase; color:var(--text-mute)}
+.spacer{flex:1}
 
 /* ---------- header ---------- */
-header{grid-area:head; display:flex; align-items:center; gap:var(--sp-4); padding:0 var(--sp-1)}
-header h1{font-size:16px; font-weight:700; letter-spacing:.04em; margin:0; display:flex; align-items:center; gap:var(--sp-2)}
-header h1 svg{width:20px;height:20px;color:var(--info)}
-.spacer{flex:1}
-.chip{display:inline-flex; align-items:center; gap:6px; padding:5px 11px; border-radius:var(--r-pill);
-  background:var(--inset); border:1px solid var(--border); font-size:12px; font-weight:600; color:var(--text-2)}
-.chip svg{width:14px;height:14px}
-.chip.on{color:var(--clear); border-color:color-mix(in oklab,var(--clear) 45%,var(--border))}
-.chip.off{color:var(--text-mute)}
-.chip.warn{color:var(--confirm); border-color:color-mix(in oklab,var(--confirm) 45%,var(--border))}
+header{grid-area:head; display:flex; align-items:center; gap:var(--sp-4);
+  padding:var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-4);
+  background:var(--panel); border:1px solid var(--border); border-radius:var(--r-card);
+  flex-wrap:wrap; row-gap:var(--sp-2)}
+header h1{font-size:var(--fs-base); font-weight:800; letter-spacing:.13em; margin:0;
+  display:flex; align-items:center; gap:var(--sp-2); white-space:nowrap;
+  padding-right:var(--sp-4); border-right:1px solid var(--border-soft)}
+header h1 svg{width:19px;height:19px;color:var(--info)}
+/* One flat wrapping row of chips. Deliberately NOT nested chip groups: a
+   wrap inside a wrapped flex item let a single chip orphan onto a line the
+   header's own height didn't account for, so it rendered outside the header
+   box. A plain divider element separates the two clusters instead -- what
+   the system reports, then what this browser controls. */
+.chipbar{flex:1 1 auto; min-width:0; display:flex; flex-wrap:wrap;
+  align-items:center; justify-content:flex-end; gap:6px}
+.chipdiv{flex:none; width:1px; align-self:stretch; min-height:22px;
+  background:var(--border-soft); margin:0 var(--sp-2)}
 
-/* ---------- alert band ---------- */
+.chip{display:inline-flex; align-items:center; gap:6px; height:30px; padding:0 11px;
+  border-radius:var(--r-pill); background:var(--inset); border:1px solid var(--border);
+  font-family:var(--font); font-size:var(--fs-sm); font-weight:650; letter-spacing:.01em;
+  color:var(--text-2); white-space:nowrap;
+  transition:border-color var(--dur) var(--ease), background var(--dur) var(--ease),
+             color var(--dur) var(--ease)}
+.chip svg{width:14px;height:14px;flex:none}
+/* NOTE: render() assigns className="chip on|off|warn" wholesale, wiping any
+   extra class. All per-chip styling therefore hangs off #id, never a class. */
+.chip.on{color:var(--clear); border-color:color-mix(in oklab,var(--clear) 40%,var(--border));
+  background:color-mix(in oklab,var(--clear) 7%,var(--inset))}
+.chip.off{color:var(--text-mute)}
+.chip.warn{color:var(--confirm); border-color:color-mix(in oklab,var(--confirm) 48%,var(--border));
+  background:color-mix(in oklab,var(--confirm) 9%,var(--inset))}
+#chipMute{cursor:pointer}
+#chipMute:hover,button.chip:hover{border-color:var(--border-strong); color:var(--text)}
+button.chip{cursor:pointer}
+button.chip:active{transform:translateY(1px)}
+.chip:focus-visible{outline:2px solid var(--info); outline-offset:2px}
+#chipCal{color:var(--info); border-color:color-mix(in oklab,var(--info) 50%,var(--border));
+  background:color-mix(in oklab,var(--info) 10%,var(--inset))}
+
+/* ---------- safety banners: supervisor notify + person-in-lane alarm ----------
+   These sit directly under the header, above everything else including the
+   informational band, and are the only elements on the page allowed a
+   full-width footprint at this size. Ranked against each other too: the
+   supervisor notice is amber and static, the person alarm is red, larger,
+   and flashing, and it also escalates the whole page (see #pageAlert). */
+#safety{grid-area:safety; display:flex; flex-direction:column; gap:var(--sp-2)}
+.safety-banner{display:none; align-items:center; gap:var(--sp-4);
+  padding:var(--sp-3) var(--sp-4); border-radius:var(--r-inner);
+  border:1px solid; font-size:var(--fs-md); line-height:1.35}
+.safety-banner.show{display:flex}
+.safety-banner svg{width:26px;height:26px;flex:none}
+.safety-banner b{color:var(--text); font-weight:800; letter-spacing:.04em}
+#alertSupervisor{
+  background:linear-gradient(90deg,
+    color-mix(in oklab,var(--confirm) 22%,var(--panel)),
+    color-mix(in oklab,var(--confirm) 11%,var(--panel)));
+  border-color:color-mix(in oklab,var(--confirm) 55%,var(--border));
+  border-left:5px solid var(--confirm); color:var(--text-2)}
+#alertSupervisor svg{color:var(--confirm)}
+#alertPerson{
+  background:linear-gradient(90deg,
+    color-mix(in oklab,var(--blocked) 32%,var(--panel)),
+    color-mix(in oklab,var(--blocked) 15%,var(--panel)));
+  border-color:color-mix(in oklab,var(--blocked) 62%,var(--border));
+  border-left:5px solid var(--blocked); color:var(--text);
+  font-size:var(--fs-lg); font-weight:600; padding:var(--sp-4);
+  animation:safetyFlash 1s step-start infinite}
+#alertPerson svg{color:var(--blocked); width:30px;height:30px}
+@keyframes safetyFlash{50%{
+  background:linear-gradient(90deg,
+    color-mix(in oklab,var(--blocked) 52%,var(--panel)),
+    color-mix(in oklab,var(--blocked) 26%,var(--panel)))}}
+
+/* ---------- page-level escalation ----------
+   Purely decorative overlay, driven entirely by :has() off the same .show /
+   data-state hooks the existing JS already toggles -- no new JS state, no new
+   element for the script to know about. A blocked lane rims the page; a
+   person on a blocked lane rims it harder and flashes, so the alarm is
+   unmissable from across the room even if the operator is scrolled into
+   the Advanced section. */
+#pageAlert{position:fixed; inset:0; z-index:40; pointer-events:none; display:none}
+body:has(.lane[data-state=blocked]) #pageAlert{display:block;
+  box-shadow:inset 0 0 0 3px color-mix(in oklab,var(--blocked) 62%,transparent),
+             inset 0 0 70px -26px color-mix(in oklab,var(--blocked) 55%,transparent)}
+body:has(#alertPerson.show) #pageAlert{display:block;
+  box-shadow:inset 0 0 0 6px var(--blocked),
+             inset 0 0 120px -20px color-mix(in oklab,var(--blocked) 72%,transparent);
+  animation:pageFlash 1s step-start infinite}
+@keyframes pageFlash{50%{
+  box-shadow:inset 0 0 0 6px color-mix(in oklab,var(--blocked) 55%,transparent),
+             inset 0 0 120px -30px color-mix(in oklab,var(--blocked) 45%,transparent)}}
+
+/* ---------- informational band (subordinate to the safety banners) ---------- */
 #alert{grid-area:alert; display:none; align-items:center; gap:var(--sp-3);
   padding:var(--sp-3) var(--sp-4); border-radius:var(--r-inner);
-  background:color-mix(in oklab,var(--confirm) 16%,var(--panel));
-  border:1px solid color-mix(in oklab,var(--confirm) 55%,var(--border)); font-size:13px}
+  background:var(--panel); border:1px solid var(--border);
+  border-left:3px solid var(--confirm);
+  font-size:var(--fs-base); color:var(--text-2)}
 #alert.show{display:flex}
-#alert svg{width:20px;height:20px;color:var(--confirm);flex:none}
-#alert b{color:var(--text)}
-
-/* ---------- safety banners: supervisor notify + person-in-lane alarm ---------- */
-#safety{grid-area:safety; display:flex; flex-direction:column; gap:var(--sp-2)}
-.safety-banner{display:none; align-items:center; gap:var(--sp-3);
-  padding:var(--sp-3) var(--sp-4); border-radius:var(--r-inner);
-  border:1px solid; font-size:13px}
-.safety-banner.show{display:flex}
-.safety-banner svg{width:20px;height:20px;flex:none}
-.safety-banner b{color:var(--text)}
-#alertSupervisor{background:color-mix(in oklab,var(--confirm) 16%,var(--panel));
-  border-color:color-mix(in oklab,var(--confirm) 55%,var(--border))}
-#alertSupervisor svg{color:var(--confirm)}
-#alertPerson{background:color-mix(in oklab,var(--blocked) 20%,var(--panel));
-  border-color:color-mix(in oklab,var(--blocked) 60%,var(--border));
-  animation:safetyFlash 1s step-start infinite}
-#alertPerson svg{color:var(--blocked)}
-@keyframes safetyFlash{50%{background:color-mix(in oklab,var(--blocked) 42%,var(--panel))}}
-@media (prefers-reduced-motion:reduce){#alertPerson{animation:none}}
+#alert svg{width:18px;height:18px;color:var(--confirm);flex:none}
+#alert b{color:var(--text); font-weight:700}
 
 /* ---------- feed ---------- */
 .feed{grid-area:feed; position:relative; background:#000; border-radius:var(--r-card);
@@ -83,64 +176,105 @@ header h1 svg{width:20px;height:20px;color:var(--info)}
    top-left corner, so clicks anywhere else on the video hit nothing. */
 #calibLayer{position:absolute; inset:0; width:100%; height:100%; cursor:crosshair; display:none}
 #calibLayer.on{display:block}
-#feedLost{position:absolute; inset:0; display:none; flex-direction:column; gap:var(--sp-2);
-  align-items:center; justify-content:center; background:var(--inset); color:var(--info); font-weight:700}
+#feedLost{position:absolute; inset:0; display:none; flex-direction:column; gap:var(--sp-3);
+  align-items:center; justify-content:center; background:var(--inset); color:var(--info);
+  font-weight:800; font-size:var(--fs-md); letter-spacing:.16em}
 #feedLost.show{display:flex}
-#feedLost svg{width:40px;height:40px}
+#feedLost svg{width:44px;height:44px}
 .feedbar{position:absolute; left:0; right:0; bottom:0; display:flex; gap:var(--sp-2);
-  padding:var(--sp-2) var(--sp-3); background:linear-gradient(transparent,rgba(10,14,20,.92)); align-items:center}
+  padding:var(--sp-3); align-items:center;
+  background:linear-gradient(transparent,rgba(7,10,15,.94))}
 
 /* ---------- side column ---------- */
-.side{grid-area:side; display:flex; flex-direction:column; gap:var(--sp-3); min-height:0; overflow-y:auto; padding-right:2px}
-.side::-webkit-scrollbar{width:8px}
-.side::-webkit-scrollbar-thumb{background:var(--border); border-radius:4px}
+.side{grid-area:side; display:flex; flex-direction:column; gap:var(--sp-3);
+  min-height:0; overflow-y:auto; padding-right:2px; scrollbar-width:thin;
+  scrollbar-color:var(--border) transparent}
+.side::-webkit-scrollbar{width:9px}
+.side::-webkit-scrollbar-track{background:transparent}
+.side::-webkit-scrollbar-thumb{background:var(--border); border-radius:5px;
+  border:2px solid var(--page)}
+.side::-webkit-scrollbar-thumb:hover{background:var(--border-strong)}
 
-/* ---------- lane cards ---------- */
-.lane{position:relative; padding:var(--sp-4); border-radius:var(--r-card); border:1px solid var(--border);
-  border-left:12px solid var(--state); background:color-mix(in oklab,var(--state) 8%,var(--panel));
-  transition:background 160ms ease,border-color 160ms ease,box-shadow 160ms ease}
+/* ---------- lane cards: the primary object on the page ---------- */
+.lane{position:relative; padding:var(--sp-4); border-radius:var(--r-card);
+  border:1px solid color-mix(in oklab,var(--state) 26%,var(--border));
+  border-left:5px solid var(--state);
+  background:
+    linear-gradient(160deg,
+      color-mix(in oklab,var(--state) 11%,var(--panel)),
+      color-mix(in oklab,var(--state) 3%,var(--panel)) 62%);
+  transition:background var(--dur) var(--ease), border-color var(--dur) var(--ease),
+             box-shadow var(--dur) var(--ease)}
 .lane[data-state=clear]{--state:var(--clear)}
 .lane[data-state=confirming]{--state:var(--confirm)}
+/* blocked transitions instantly -- an easing curve on the most urgent state
+   change on the page is 160ms of the operator seeing the wrong thing */
 .lane[data-state=blocked]{--state:var(--blocked); transition-duration:0ms;
-  box-shadow:0 0 0 1px var(--blocked),0 0 34px -8px color-mix(in oklab,var(--blocked) 70%,transparent)}
+  box-shadow:0 0 0 1px var(--blocked),
+             0 0 40px -10px color-mix(in oklab,var(--blocked) 72%,transparent)}
+
 .lane-top{display:flex; align-items:center; gap:var(--sp-3)}
-.lane-icon{width:34px;height:34px;color:var(--state);flex:none}
-.lane-name{font-size:13px; font-weight:700; letter-spacing:.1em; color:var(--text-2)}
-.lane-state{font-size:clamp(24px,2.4vw,34px); font-weight:800; letter-spacing:.02em; line-height:1; color:var(--state)}
-@keyframes pulse{50%{opacity:.45}}
+/* the icon sits in its own tinted well, so the state reads as a deliberate
+   badge rather than a loose glyph floating next to text */
+.lane-badge{flex:none; width:46px; height:46px; border-radius:var(--r-inner);
+  display:flex; align-items:center; justify-content:center;
+  background:color-mix(in oklab,var(--state) 15%,var(--inset));
+  border:1px solid color-mix(in oklab,var(--state) 34%,var(--border))}
+.lane-icon{width:26px;height:26px;color:var(--state)}
+.lane-id{display:flex; flex-direction:column; gap:2px; min-width:0}
+.lane-name{font-size:var(--fs-lbl); font-weight:700; letter-spacing:.16em; color:var(--text-2)}
+.lane-state{font-size:clamp(26px,2.5vw,36px); font-weight:800; letter-spacing:-.005em;
+  line-height:1; color:var(--state)}
+@keyframes pulse{50%{opacity:.4}}
 .lane[data-state=confirming] .lane-icon{animation:pulse 1.1s ease-in-out infinite}
-.ovr{margin-left:auto; font-size:10px; font-weight:800; letter-spacing:.06em; padding:4px 8px;
-  border-radius:var(--r-chip); background:var(--blocked); color:#0A0E14}
+.ovr{margin-left:auto; align-self:flex-start; font-size:var(--fs-micro); font-weight:800;
+  letter-spacing:.08em; padding:5px 9px; border-radius:var(--r-chip);
+  background:var(--blocked); color:var(--page); white-space:nowrap}
 .ovr.green{background:var(--info)}
 
-.meter{margin-top:var(--sp-3)}
-.meter-head{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px}
-.meter-head .v{font-size:15px; font-weight:600; color:var(--text)}
-.track{position:relative; height:14px; border-radius:7px; background:var(--inset);
+.meter{margin-top:var(--sp-4)}
+.meter-head{display:flex; justify-content:space-between; align-items:baseline;
+  gap:var(--sp-3); margin-bottom:7px}
+/* the countdown is the number an operator actually watches -- give it the
+   largest non-headline size in the card */
+.meter-head .v{font-size:var(--fs-lg); font-weight:650; color:var(--text); line-height:1}
+.track{position:relative; height:16px; border-radius:8px; background:var(--inset);
   box-shadow:inset 0 0 0 1px var(--border-soft); overflow:hidden}
-.fill{height:100%; background:var(--state); border-radius:7px; transition:width 120ms linear}
+.fill{height:100%; background:var(--state); border-radius:8px;
+  transition:width 120ms linear}
 .ticks{position:absolute; inset:0; pointer-events:none;
-  background:repeating-linear-gradient(90deg,transparent 0 calc(12.5% - 1px),rgba(10,14,20,.55) calc(12.5% - 1px) 12.5%)}
-.release{position:absolute; top:-3px; bottom:-3px; width:2px; background:var(--text-2); border-radius:1px}
-.track2{margin-top:var(--sp-2); height:6px; border-radius:3px; background:var(--inset);
+  background:repeating-linear-gradient(90deg,transparent 0 calc(12.5% - 1px),
+    color-mix(in oklab,var(--page) 70%,transparent) calc(12.5% - 1px) 12.5%)}
+.release{position:absolute; top:-3px; bottom:-3px; width:2px;
+  background:var(--text); border-radius:1px;
+  box-shadow:0 0 0 1px color-mix(in oklab,var(--page) 80%,transparent)}
+.track2{margin-top:var(--sp-3); height:7px; border-radius:4px; background:var(--inset);
   box-shadow:inset 0 0 0 1px var(--border-soft); overflow:hidden}
-.fill2{height:100%; background:var(--text-2); border-radius:3px; transition:width 160ms ease}
-.meter-foot{display:flex; justify-content:space-between; margin-top:5px; font-size:11px; color:var(--text-mute)}
+.fill2{height:100%; background:var(--text-2); border-radius:4px; transition:width 160ms var(--ease)}
+.meter-foot{display:flex; justify-content:space-between; gap:var(--sp-3);
+  margin-top:6px; font-size:var(--fs-lbl); color:var(--text-mute)}
 
-.lane-actions{display:flex; gap:6px; margin-top:var(--sp-3)}
-.seg{display:flex; background:var(--inset); border:1px solid var(--border); border-radius:var(--r-chip); overflow:hidden; flex:1}
-.seg button{flex:1; background:none; border:0; color:var(--text-2); font-family:var(--font);
-  font-size:11px; font-weight:700; letter-spacing:.04em; padding:7px 4px; cursor:pointer; transition:background 120ms}
-.seg button:hover{background:#1A2432; color:var(--text)}
+/* ---------- segmented override control ---------- */
+.lane-actions{display:flex; gap:6px; margin-top:var(--sp-4)}
+.seg{display:flex; background:var(--inset); border:1px solid var(--border);
+  border-radius:var(--r-inner); overflow:hidden; flex:1}
+.seg button{flex:1; min-height:var(--hit); background:none; border:0;
+  color:var(--text-2); font-family:var(--font); font-size:var(--fs-lbl); font-weight:750;
+  letter-spacing:.06em; padding:8px 4px; cursor:pointer; white-space:nowrap;
+  transition:background var(--dur) var(--ease), color var(--dur) var(--ease)}
+.seg button+button{border-left:1px solid var(--border-soft)}
+.seg button:hover{background:var(--raised); color:var(--text)}
+.seg button:focus-visible{outline:2px solid var(--info); outline-offset:-2px; z-index:1}
 .seg button.sel{background:var(--text-2); color:var(--page)}
-.seg button.sel[data-mode=red]{background:var(--blocked); color:#0A0E14}
-.seg button.sel[data-mode=green]{background:var(--info); color:#0A0E14}
+.seg button.sel[data-mode=red]{background:var(--blocked); color:var(--page)}
+.seg button.sel[data-mode=green]{background:var(--info); color:var(--page)}
 
-/* ---------- controls ---------- */
+/* ---------- sections ---------- */
 .sect{padding:var(--sp-4)}
-.sect h2{font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
-  color:var(--text-mute); margin:0 0 var(--sp-3)}
+.sect h2{font-size:var(--fs-lbl); font-weight:700; letter-spacing:.09em;
+  text-transform:uppercase; color:var(--text-mute); margin:0 0 var(--sp-3)}
 .grid2{display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-2)}
+.stack{display:flex; flex-direction:column; gap:var(--sp-2)}
 
 /* ---------- Advanced disclosure ----------
    Everything setup-time or diagnostic (calibration, recovery, pipeline
@@ -149,105 +283,230 @@ header h1 svg{width:20px;height:20px;color:var(--info)}
    actually watched during a live demo. Nothing is removed, only deferred
    one click. Native <details>/<summary>: free keyboard/a11y support, no JS. */
 details.adv{padding:0}
-details.adv summary{list-style:none; cursor:pointer; padding:var(--sp-3) var(--sp-4);
-  display:flex; align-items:center; gap:var(--sp-2);
-  font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
-  color:var(--text-mute)}
+details.adv summary{list-style:none; cursor:pointer; min-height:var(--hit);
+  padding:var(--sp-3) var(--sp-4); display:flex; align-items:center; gap:var(--sp-2);
+  font-size:var(--fs-lbl); font-weight:700; letter-spacing:.09em; text-transform:uppercase;
+  color:var(--text-mute); border-radius:var(--r-card);
+  transition:color var(--dur) var(--ease), background var(--dur) var(--ease)}
 details.adv summary::-webkit-details-marker{display:none}
 details.adv summary svg{width:14px;height:14px}
-details.adv summary::after{content:"";margin-left:auto; width:7px; height:7px;
-  border-right:1.5px solid var(--text-mute); border-bottom:1.5px solid var(--text-mute);
-  transform:rotate(45deg); transition:transform 120ms ease}
+details.adv summary::after{content:""; margin-left:auto; width:7px; height:7px;
+  border-right:1.5px solid currentColor; border-bottom:1.5px solid currentColor;
+  transform:rotate(45deg) translate(-1px,-1px);
+  transition:transform var(--dur) var(--ease)}
+details.adv[open] summary{color:var(--text-2); border-radius:var(--r-card) var(--r-card) 0 0}
 details.adv[open] summary::after{transform:rotate(-135deg)}
-details.adv summary:hover{color:var(--text-2)}
+details.adv summary:hover{color:var(--text); background:var(--raised)}
+details.adv summary:focus-visible{outline:2px solid var(--info); outline-offset:-2px}
 details.adv .advBody{border-top:1px solid var(--border-soft)}
 details.adv .advBody .sect+.sect{border-top:1px solid var(--border-soft)}
-button.act{display:flex; align-items:center; gap:var(--sp-2); width:100%; text-align:left;
-  padding:10px var(--sp-3); border-radius:var(--r-inner); border:1px solid var(--border);
-  background:var(--inset); color:var(--text); font-family:var(--font); font-size:12.5px;
-  font-weight:600; cursor:pointer; transition:background 120ms,border-color 120ms}
-button.act svg{width:16px;height:16px;color:var(--text-2);flex:none}
-button.act:hover{background:#1A2432; border-color:#33404f}
+
+button.act{display:flex; align-items:center; gap:var(--sp-3); width:100%;
+  min-height:var(--hit); text-align:left; padding:9px var(--sp-3);
+  border-radius:var(--r-inner); border:1px solid var(--border);
+  background:var(--inset); color:var(--text); font-family:var(--font);
+  font-size:var(--fs-base); font-weight:600; cursor:pointer;
+  transition:background var(--dur) var(--ease), border-color var(--dur) var(--ease)}
+button.act svg{width:16px;height:16px;color:var(--text-2);flex:none;
+  transition:color var(--dur) var(--ease)}
+button.act:hover{background:var(--raised); border-color:var(--border-strong)}
+button.act:hover svg{color:var(--text)}
 button.act:active{transform:translateY(1px)}
-button.act.danger{border-color:color-mix(in oklab,var(--blocked) 45%,var(--border))}
+button.act.danger{border-color:color-mix(in oklab,var(--blocked) 42%,var(--border))}
 button.act.danger svg{color:var(--blocked)}
-button.act.primary{border-color:color-mix(in oklab,var(--info) 50%,var(--border))}
+button.act.danger:hover{background:color-mix(in oklab,var(--blocked) 12%,var(--inset));
+  border-color:var(--blocked)}
+button.act.danger:hover svg{color:var(--blocked)}
+button.act.primary{border-color:color-mix(in oklab,var(--info) 46%,var(--border))}
 button.act.primary svg{color:var(--info)}
+button.act.primary:hover{background:color-mix(in oklab,var(--info) 12%,var(--inset));
+  border-color:var(--info)}
+button.act.primary:hover svg{color:var(--info)}
 button.act:focus-visible{outline:2px solid var(--info); outline-offset:2px}
 
-.tog{display:flex; align-items:center; justify-content:space-between; padding:8px var(--sp-3);
-  border-radius:var(--r-inner); background:var(--inset); border:1px solid var(--border);
-  font-size:12.5px; cursor:pointer; margin-bottom:6px}
-.tog:hover{background:#1A2432}
-.tog .sw{width:34px;height:19px;border-radius:var(--r-pill); background:var(--border); position:relative; transition:background 160ms}
-.tog .sw::after{content:""; position:absolute; top:2px; left:2px; width:15px;height:15px; border-radius:50%;
-  background:var(--text-mute); transition:transform 160ms,background 160ms}
-.tog.on .sw{background:color-mix(in oklab,var(--info) 55%,var(--inset))}
-.tog.on .sw::after{transform:translateX(15px); background:var(--info)}
+.tog{display:flex; align-items:center; justify-content:space-between; gap:var(--sp-3);
+  min-height:var(--hit); padding:8px var(--sp-3); border-radius:var(--r-inner);
+  background:var(--inset); border:1px solid var(--border);
+  font-size:var(--fs-base); cursor:pointer; margin-bottom:6px; color:var(--text-2);
+  transition:background var(--dur) var(--ease), border-color var(--dur) var(--ease),
+             color var(--dur) var(--ease)}
+.tog:hover{background:var(--raised); border-color:var(--border-strong); color:var(--text)}
+.tog.on{color:var(--text)}
+.tog .sw{flex:none; width:36px; height:20px; border-radius:var(--r-pill);
+  background:var(--border); position:relative;
+  transition:background var(--dur) var(--ease)}
+.tog .sw::after{content:""; position:absolute; top:2px; left:2px; width:16px; height:16px;
+  border-radius:50%; background:var(--text-mute);
+  transition:transform var(--dur) var(--ease), background var(--dur) var(--ease)}
+.tog.on .sw{background:color-mix(in oklab,var(--info) 50%,var(--inset))}
+.tog.on .sw::after{transform:translateX(16px); background:var(--info)}
 
-.slider{margin-bottom:var(--sp-3)}
-.slider .row{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:5px}
-.slider .row span:last-child{font-size:12px; color:var(--text)}
-input[type=range]{width:100%; -webkit-appearance:none; height:4px; border-radius:2px; background:var(--border); outline:none}
-input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; width:15px;height:15px;border-radius:50%;
-  background:var(--info); cursor:pointer; border:2px solid var(--panel)}
+.slider{margin-bottom:var(--sp-4)}
+.slider:last-child{margin-bottom:0}
+/* labels here are long enough to wrap in a narrow side column, so the row
+   aligns on its last line and reserves real space below it -- baseline
+   alignment let a two-line label collide with the track underneath */
+.slider .row{display:flex; justify-content:space-between; align-items:flex-end;
+  gap:var(--sp-3); margin-bottom:11px}
+.slider .row .lbl{flex:1; min-width:0; line-height:1.35}
+.slider .row span:last-child{flex:none; font-size:var(--fs-md); font-weight:650;
+  color:var(--text); line-height:1.1}
+input[type=range]{width:100%; -webkit-appearance:none; appearance:none; height:5px;
+  border-radius:3px; background:var(--border); outline:none; cursor:pointer}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; width:18px; height:18px;
+  border-radius:50%; background:var(--info); cursor:pointer; border:3px solid var(--panel);
+  box-shadow:0 0 0 1px var(--border-strong)}
+input[type=range]::-moz-range-thumb{width:18px; height:18px; border-radius:50%;
+  background:var(--info); cursor:pointer; border:3px solid var(--panel)}
+input[type=range]:focus-visible{outline:2px solid var(--info); outline-offset:4px}
 
-/* ---------- diag ---------- */
-.diag{grid-area:diag; display:grid; grid-template-columns:repeat(7,1fr); gap:var(--sp-2)}
-.tile{padding:9px var(--sp-3); border-radius:var(--r-inner); background:var(--panel); border:1px solid var(--border)}
-.tile .v{font-size:17px; font-weight:600; margin-top:2px}
-.tile.alarm{border-color:var(--blocked)} .tile.alarm .v{color:var(--blocked)}
-.tile.warn{border-color:var(--confirm)} .tile.warn .v{color:var(--confirm)}
+/* ---------- diag strip ----------
+   One panel divided into cells rather than seven floating cards: the row
+   reads as a single instrument cluster, and the dividers do the separating
+   work that seven sets of borders were doing badly. */
+.diag{grid-area:diag; display:grid; grid-template-columns:repeat(7,1fr);
+  background:var(--panel); border:1px solid var(--border); border-radius:var(--r-card);
+  overflow:hidden}
+.tile{padding:var(--sp-3) var(--sp-4); position:relative; min-width:0}
+.tile+.tile{border-left:1px solid var(--border-soft)}
+.tile .v{font-size:var(--fs-lg); font-weight:650; margin-top:3px; line-height:1.15;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+/* state is carried by a top accent rule + the value colour, not a full border,
+   so an alarming tile doesn't fight the strip's own edges */
+.tile::before{content:""; position:absolute; top:0; left:0; right:0; height:2px;
+  background:transparent}
 .tile.ok .v{color:var(--clear)}
+.tile.warn::before{background:var(--confirm)}
+.tile.warn .v{color:var(--confirm)}
+.tile.warn{background:color-mix(in oklab,var(--confirm) 7%,transparent)}
+.tile.alarm::before{background:var(--blocked)}
+.tile.alarm .v{color:var(--blocked)}
+.tile.alarm{background:color-mix(in oklab,var(--blocked) 10%,transparent)}
 
 /* ---------- log ---------- */
-#log{max-height:190px; overflow-y:auto; font-size:11.5px}
-#log div{display:flex; gap:var(--sp-2); padding:3px 0; border-bottom:1px solid var(--border-soft)}
-#log .t{color:var(--text-mute); flex:none}
+#log{max-height:200px; overflow-y:auto; font-size:var(--fs-sm); margin:0 calc(var(--sp-4) * -1);
+  padding:0 var(--sp-4); scrollbar-width:thin; scrollbar-color:var(--border) transparent}
+#log::-webkit-scrollbar{width:9px}
+#log::-webkit-scrollbar-thumb{background:var(--border); border-radius:5px;
+  border:2px solid var(--panel)}
+#log div{display:flex; gap:var(--sp-3); padding:5px 0; border-bottom:1px solid var(--border-soft)}
+#log div:last-child{border-bottom:0}
+#log .t{color:var(--text-mute); flex:none; font-size:var(--fs-lbl)}
 #log .info{color:var(--text-2)} #log .ok{color:var(--clear)}
-#log .warn{color:var(--confirm)} #log .error{color:var(--blocked)}
+#log .warn{color:var(--confirm)} #log .error{color:var(--blocked); font-weight:600}
 
 /* ---------- modal ---------- */
-#modal{position:fixed; inset:0; background:rgba(5,8,12,.78); display:none; align-items:center; justify-content:center; z-index:50; padding:var(--sp-4)}
+#modal{position:fixed; inset:0; background:rgba(4,6,10,.82); backdrop-filter:blur(3px);
+  display:none; align-items:center; justify-content:center; z-index:50; padding:var(--sp-4)}
 #modal.show{display:flex}
-.mbox{width:min(480px,94vw); padding:var(--sp-5); border-radius:var(--r-card); background:var(--panel); border:1px solid var(--blocked);
-  box-shadow:0 20px 60px -12px rgba(0,0,0,.6)}
-.mbox h3{margin:0 0 var(--sp-3); font-size:18px; display:flex; align-items:center; gap:10px}
-.mbox h3 svg{width:22px;height:22px;color:var(--blocked); flex:none}
-.mbox p{color:var(--text-2); font-size:13.5px; line-height:1.6; margin:0 0 var(--sp-5)}
+.mbox{width:min(500px,94vw); padding:var(--sp-5); border-radius:var(--r-card);
+  background:var(--panel); border:1px solid color-mix(in oklab,var(--blocked) 55%,var(--border));
+  border-top:3px solid var(--blocked);
+  box-shadow:0 28px 70px -14px rgba(0,0,0,.72)}
+.mbox h3{margin:0 0 var(--sp-3); font-size:var(--fs-xl); font-weight:750; line-height:1.2;
+  display:flex; align-items:center; gap:var(--sp-3)}
+.mbox h3 svg{width:24px;height:24px;color:var(--blocked); flex:none}
+.mbox p{color:var(--text-2); font-size:var(--fs-base); line-height:1.65; margin:0 0 var(--sp-5)}
 .mrow{display:flex; gap:var(--sp-3)}
 /* button.act sets width:100%, which fights flex sizing here -- without this
    reset the Cancel button claims nearly the whole row and Hold gets crushed
    into a sliver, clipping its text (the bug reported: "old t / onfir"). */
-.mrow button.act{flex:1; width:auto; justify-content:center; white-space:nowrap; padding:12px var(--sp-3)}
+.mrow button.act{flex:1; width:auto; justify-content:center; white-space:nowrap;
+  min-height:46px; padding:12px var(--sp-3)}
 .hold{position:relative; overflow:hidden; flex-direction:column; gap:2px !important}
-.hold .bar{position:absolute; inset:0; background:var(--blocked); width:0; transition:width 60ms linear; opacity:.55}
+.hold .bar{position:absolute; inset:0; background:var(--blocked); width:0;
+  transition:width 60ms linear; opacity:.5}
 .hold span{position:relative; z-index:1}
-.hold .sub{font-size:10px; font-weight:600; color:var(--text-2); letter-spacing:.03em; text-transform:none}
+.hold .sub{font-size:var(--fs-micro); font-weight:600; color:var(--text-2);
+  letter-spacing:.03em; text-transform:none}
 .hold.danger span:first-of-type{color:var(--text)}
+
+/* ---------- coarse pointers: every target to 48px ---------- */
+@media (pointer:coarse){
+  :root{--hit:48px}
+  .chip{height:40px; padding:0 14px}
+  .seg button{font-size:var(--fs-sm)}
+  input[type=range]{height:8px}
+  input[type=range]::-webkit-slider-thumb{width:26px;height:26px}
+  input[type=range]::-moz-range-thumb{width:26px;height:26px}
+  .tog .sw{width:44px;height:26px}
+  .tog .sw::after{width:22px;height:22px}
+  .tog.on .sw::after{transform:translateX(18px)}
+}
 
 @media (prefers-reduced-motion:reduce){
   *{animation:none !important; transition-duration:0ms !important}
-  .lane[data-state=confirming] .lane-icon{outline:2px dashed var(--confirm); outline-offset:3px; border-radius:50%}
+  /* the two flashing safety cues are the whole point of those elements, so
+     they get a static high-contrast substitute rather than simply vanishing */
+  #alertPerson{background:color-mix(in oklab,var(--blocked) 42%,var(--panel)) !important;
+    outline:3px solid var(--blocked); outline-offset:-3px}
+  body:has(#alertPerson.show) #pageAlert{
+    box-shadow:inset 0 0 0 6px var(--blocked) !important}
+  .lane[data-state=confirming] .lane-icon{outline:2px dashed var(--confirm);
+    outline-offset:3px; border-radius:50%}
+}
+
+/* ---------- responsive ----------
+   1150: single column, side column above the feed (lane state outranks video).
+    820: diag strip wraps to 4 then 2 columns, lane meters keep full width.
+    560: header stacks, override buttons stay full-height and readable. */
+@media (max-width:1400px){
+  .diag{grid-template-columns:repeat(4,1fr)}
+  .tile:nth-child(4n+1){border-left:0}
+  .tile:nth-child(n+5){border-top:1px solid var(--border-soft)}
 }
 @media (max-width:1150px){
-  body{grid-template-columns:1fr; grid-template-areas:"head" "alert" "side" "feed" "diag"; overflow:auto}
-  .diag{grid-template-columns:repeat(3,1fr)}
+  /* Single column, and the lane cards move ABOVE the video: on a tablet or
+     phone the lane state is what's being checked, the feed is confirmation.
+     height must be released here -- html,body{height:100%} gives the grid a
+     definite height, which compresses these auto rows to fit the viewport
+     instead of letting them size to content, and the side column's ~590px of
+     lane cards then overflowed on top of the feed and the diag strip. */
+  html{height:auto}
+  body{height:auto; min-height:100%; overflow:visible;
+    grid-template-columns:1fr; grid-template-rows:repeat(6,auto);
+    grid-template-areas:"head" "safety" "alert" "side" "feed" "diag"}
+  .side{overflow:visible; min-height:0}
+}
+@media (max-width:820px){
+  .diag{grid-template-columns:repeat(2,1fr)}
+  .tile:nth-child(n){border-left:0; border-top:1px solid var(--border-soft)}
+  .tile:nth-child(2n){border-left:1px solid var(--border-soft)}
+  .tile:nth-child(-n+2){border-top:0}
+  .lane-state{font-size:30px}
+}
+@media (max-width:560px){
+  body{padding:var(--sp-2); gap:var(--sp-2)}
+  header{padding:var(--sp-3)}
+  header h1{border-right:0; padding-right:0; width:100%}
+  .chipbar{justify-content:flex-start}
+  .chipdiv{display:none}
+  .grid2{grid-template-columns:1fr}
+  .lane-actions .seg{flex-direction:column}
+  .seg button+button{border-left:0; border-top:1px solid var(--border-soft)}
+  #alertPerson{font-size:var(--fs-md)}
 }
 </style>
 </head>
 <body>
 
+<!-- decorative page-level escalation; no script references this element -->
+<div id="pageAlert" aria-hidden="true"></div>
+
 <header>
   <h1><i data-i="radio"></i> LANE MONITOR</h1>
-  <span class="spacer"></span>
-  <span class="chip" id="chipCal" style="display:none"><i data-i="crosshair"></i><span>calibrating</span></span>
-  <span class="chip" id="chipModel"><i data-i="cpu"></i><span>model</span></span>
-  <span class="chip" id="chipSerial"><i data-i="cable"></i><span>serial</span></span>
-  <span class="chip" id="chipCmd"><i data-i="radio"></i><span>cmd</span></span>
-  <span class="chip" id="chipLed" title="Not the same thing as 'cmd' -- cmd is what the dashboard SENT, this is what the ESP32 itself reports it actually applied. The firmware echoes every command it receives, so a write() that succeeds doesn't get trusted blindly."><i data-i="circle-check"></i><span>LED</span></span>
-  <span class="chip" id="chipShift" title="Tracks the lane-boundary corners frame to frame and warps a bumped camera back into alignment automatically. 'shift-safe: off' means no corner_ref.json yet -- recapture the baseline to build one."><i data-i="crosshair"></i><span>shift-safe</span></span>
-  <span class="chip" id="chipMute" onclick="toggleMute()" style="cursor:pointer" title="Mutes this browser's alarm beeps only — the banners, the log, and the physical LEDs are unaffected"><i data-i="zap"></i><span>alarm sound</span></span>
+  <div class="chipbar">
+    <span class="chip" id="chipCal" style="display:none"><i data-i="crosshair"></i><span>calibrating</span></span>
+    <span class="chip" id="chipModel"><i data-i="cpu"></i><span>model</span></span>
+    <span class="chip" id="chipSerial"><i data-i="cable"></i><span>serial</span></span>
+    <span class="chip" id="chipCmd"><i data-i="radio"></i><span>cmd</span></span>
+    <span class="chip" id="chipLed" title="Not the same thing as 'cmd' -- cmd is what the dashboard SENT, this is what the ESP32 itself reports it actually applied. The firmware echoes every command it receives, so a write() that succeeds doesn't get trusted blindly."><i data-i="circle-check"></i><span>LED</span></span>
+    <span class="chip" id="chipShift" title="Tracks the lane-boundary corners frame to frame and warps a bumped camera back into alignment automatically. 'shift-safe: off' means no corner_ref.json yet -- recapture the baseline to build one."><i data-i="crosshair"></i><span>shift-safe</span></span>
+    <span class="chipdiv" aria-hidden="true"></span>
+    <span class="chip" id="chipMute" onclick="toggleMute()" title="Mutes this browser's alarm beeps only — the banners, the log, and the physical LEDs are unaffected"><i data-i="zap"></i><span>alarm sound</span></span>
+    <button class="chip" onclick="testSounds()"
+            title="Preview both alert sounds right now, regardless of mute">Test</button>
+  </div>
 </header>
 
 <div id="safety">
@@ -279,7 +538,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; width:15px;heig
 
       <div class="sect">
         <h2>Recovery</h2>
-        <div style="display:flex;flex-direction:column;gap:6px">
+        <div class="stack">
           <button class="act primary" onclick="act('relearn')"><i data-i="refresh-cw"></i>Unstick — relearn current scene</button>
           <button class="act" onclick="act('reset_model')"><i data-i="rotate-ccw"></i>Reset model from saved baseline</button>
           <button class="act danger" onclick="rebaseline()"><i data-i="scan-line"></i>Re-capture baseline (90 frames)</button>
@@ -352,6 +611,11 @@ function updateFeedLost(){
     imgErrored || fetchFailed || (Date.now()-lastStateChangeAt > STATE_STALE_MS));
 }
 let alarmCtx=null, lastSupervisorKey="", personAlarmTimer=null;
+// Single source of truth for each alert's base loudness (before the user's
+// volume slider multiplies it) -- testSounds() reads these too, so the Test
+// button can never silently drift out of sync with what a real alert plays,
+// the way it did the first time these were tuned.
+const SUP_VOL=0.20, PER_VOL=0.24;
 
 // Mute is per-browser (localStorage), not sent to the server: it silences
 // what THIS viewer hears, same way the alarm itself was already per-viewer.
@@ -387,15 +651,19 @@ function ensureAudio(){
 // the original beep read as an alarm klaxon rather than a notification. A
 // soft attack/decay envelope on the gain matters just as much as the
 // waveform -- switching an oscillator on/off at full volume produces an
-// audible click at both edges no matter what shape the wave is.
-function tone(freq, ms, vol, type){
-  if(isMuted()) return;
+// audible click at both edges no matter what shape the wave is. Volume is
+// fixed (SUP_VOL/PER_VOL above) -- there was a live user-adjustable slider
+// here, removed once the level was settled on, so it can't drift again.
+// `force` bypasses mute (only the Test button uses it) without touching the
+// persisted mute setting.
+function tone(freq, ms, vol, type, force){
+  if(isMuted() && !force) return;
   const ctx=ensureAudio(); if(!ctx) return;
   const osc=ctx.createOscillator(), gain=ctx.createGain();
   osc.type=type||"sine"; osc.frequency.value=freq;
   const t0=ctx.currentTime, dur=ms/1000, peak=vol==null?0.15:vol;
   gain.gain.setValueAtTime(0.0001, t0);
-  gain.gain.exponentialRampToValueAtTime(peak, t0+0.015);
+  gain.gain.exponentialRampToValueAtTime(Math.max(peak,0.0001), t0+0.015);
   gain.gain.exponentialRampToValueAtTime(0.0001, t0+dur);
   osc.connect(gain).connect(ctx.destination);
   osc.start(t0); osc.stop(t0+dur+0.02);
@@ -419,7 +687,7 @@ function updateSafety(s){
       `<b>LANE ${a.lane}</b> obstruction detected — supervisor notified (${a.since_s}s)`
     ).join(" &nbsp;·&nbsp; ");
     const key=sup.map(a=>a.lane).sort().join(",");
-    if(key!==lastSupervisorKey){ tone(880,150,0.11); setTimeout(()=>tone(1175,220,0.11),140); }
+    if(key!==lastSupervisorKey){ tone(659,150,SUP_VOL); setTimeout(()=>tone(880,220,SUP_VOL),140); }
     lastSupervisorKey=key;
   } else {
     supEl.classList.remove("show");
@@ -435,9 +703,9 @@ function updateSafety(s){
     if(!personAlarmTimer){
       personAlarmHigh=false;
       personAlarmTimer=setInterval(()=>{
-        tone(personAlarmHigh?1318:988, 150, 0.15);
+        tone(personAlarmHigh?659:494, 150, PER_VOL);
         personAlarmHigh=!personAlarmHigh;
-      }, 420);
+      }, 550);
     }
   } else {
     perEl.classList.remove("show");
@@ -548,7 +816,7 @@ function drawCalib(){
   let w=r.width,h=r.height,ox=0,oy=0;
   if(br>ar){w=r.height*ar; ox=(r.width-w)/2;} else {h=r.width/ar; oy=(r.height-h)/2;}
   const g=c.getContext("2d"); g.clearRect(0,0,c.width,c.height);
-  for(const [lane,col] of [["A","#00D18F"],["B","#4C9AFF"]]){
+  for(const [lane,col] of [["A","#12D18C"],["B","#5B9DFF"]]){
     const pts=calib.pts[lane]; if(!pts.length) continue;
     g.strokeStyle=col; g.fillStyle=col; g.lineWidth=2.5; g.beginPath();
     pts.forEach(([x,y],i)=>{const px=ox+x*w,py=oy+y*h; i?g.lineTo(px,py):g.moveTo(px,py);});
@@ -556,7 +824,7 @@ function drawCalib(){
     g.stroke();
     pts.forEach(([x,y],i)=>{const px=ox+x*w,py=oy+y*h;
       g.beginPath(); g.arc(px,py,7,0,7); g.fill();
-      g.fillStyle="#0A0E14"; g.font="bold 11px system-ui"; g.textAlign="center";
+      g.fillStyle="#070A0F"; g.font="bold 11px system-ui"; g.textAlign="center";
       g.fillText(i+1,px,py+4); g.fillStyle=col;});
   }
   document.getElementById("calibHint").textContent=
@@ -598,8 +866,8 @@ function render(s){
     const exp=(s.override_expires||{})[n];
     el.innerHTML=`
       <div class="lane-top">
-        ${svg(STATE_ICON[st],"lane-icon")}
-        <div><div class="lane-name">LANE ${n}</div>
+        <div class="lane-badge">${svg(STATE_ICON[st],"lane-icon")}</div>
+        <div class="lane-id"><div class="lane-name">LANE ${n}</div>
              <div class="lane-state">${st==="confirming"?"CONFIRMING":st.toUpperCase()}</div></div>
         ${L.override!=="auto"?`<span class="ovr ${L.override==="green"?"green":""}">
             ${L.override==="green"?"FORCED CLEAR":"FORCED RED"}${exp?" "+Math.ceil(exp)+"s":""}</span>`:""}
@@ -714,6 +982,19 @@ async function poll(){
   } catch(e){ fetchFailed=true; updateFeedLost(); }
 }
 setMuted(isMuted());   // paint the chip's actual starting state, not a blank one
+// Bypasses mute (force=true) so Test always demonstrates the actual sound,
+// without silently un-muting a deliberate choice or requiring a real alert.
+function testSounds(){
+  tone(659,150,SUP_VOL,"sine",true);
+  setTimeout(()=>tone(880,220,SUP_VOL,"sine",true),140);
+  setTimeout(()=>{
+    let n=0;
+    const iv=setInterval(()=>{
+      tone(n%2?659:494,150,PER_VOL,"sine",true);
+      if(++n>=4) clearInterval(iv);
+    },550);
+  },900);
+}
 document.addEventListener("pointerdown", ()=>ensureAudio(), {once:true});
 fetch("/icons.json").then(r=>r.json()).then(j=>{ICONS=j; paintIcons(); poll(); setInterval(poll,400);});
 window.addEventListener("resize",()=>{if(calib) drawCalib();});
