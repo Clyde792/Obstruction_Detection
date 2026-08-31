@@ -5,27 +5,45 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Lane Monitor</title>
 <style>
-/* Palette is deliberately NOT pure red/green. A standard status green vs red
-   pair measures ~4.1 perceptual distance under deuteranopia -- effectively
-   indistinguishable. Shifting green toward teal raises that to ~12.8 while
-   still reading unmistakably as "green" to normal vision. The ESP32's actual
-   LEDs stay red/green; only the screen compensates.
+/* LIGHT palette, three status hues only: red / green / yellow. Everything
+   that is not a status indicator is a neutral light tone, so the only
+   saturated colour anywhere on the page means something.
 
-   Retuned, same reasoning: the page/panel steps were darkened and separated
-   so the three status hues sit on a quieter ground and win the eye by
-   themselves rather than competing with panel chrome. Hue angles are
-   unchanged (teal / amber / red-orange), only chroma and lightness moved. */
+   This deliberately drops the previous teal-shifted green. That shift
+   existed for a real reason -- a standard status green vs red pair measures
+   only ~4.1 perceptual distance under deuteranopia, and teal raised it to
+   ~12.8 -- so plain red/green is a genuine accessibility regression on
+   colour alone. It is acceptable here only because colour is never the sole
+   carrier of state: every lane prints its state as a word (CLEAR /
+   CONFIRMING / BLOCKED) and shows a differently-shaped icon (circle /
+   triangle / octagon), and the diag tiles do the same. If that ever stops
+   being true, this decision needs revisiting. */
 :root{
-  /* surfaces: 4 steps, each a clear stop -- page < panel < raised < inset */
-  --page:#070A0F; --panel:#0F151E; --raised:#151D28; --inset:#0A0F16;
-  --border:#232E3D; --border-soft:#19212C; --border-strong:#31404F;
+  /* surfaces: 4 steps -- page < panel < raised < inset. On a light theme
+     "inset" reads as recessed by being slightly DARKER than the panel,
+     the inverse of how the same token worked on the dark palette. */
+  --page:#EEF1F5; --panel:#FFFFFF; --raised:#F4F7FA; --inset:#E9EDF2;
+  --border:#D2DAE3; --border-soft:#E4EAF0; --border-strong:#B3BFCC;
 
-  /* text: 4 steps, used strictly by rank -- primary value, label, muted */
-  --text:#EAEFF6; --text-2:#9CAABE; --text-mute:#65727F;
+  /* text: 3 steps, used strictly by rank -- primary value, label, muted */
+  /* --text-mute is darker than a typical "muted" grey on purpose: it styles
+     every small uppercase label on the page (11px), which is below the size
+     that qualifies for the relaxed large-text contrast bar, so it has to
+     clear 4.5:1 on its own rather than looking pleasantly faint. */
+  --text:#161C24; --text-2:#4B5867; --text-mute:#626D7A;
 
-  /* status. --blocked is the single most saturated thing on the page, on
-     purpose: nothing else is allowed to compete with it. */
-  --clear:#12D18C; --confirm:#FFB020; --blocked:#FF4438; --info:#5B9DFF;
+  /* Two tiers per status hue. The bright value fills bars, badges and
+     borders; the -ink value is for text and icons, because a green or
+     yellow bright enough to read as a filled bar falls well below readable
+     contrast as small text on a light ground. */
+  --clear:#16A34A;   --clear-ink:#0B6129;
+  --confirm:#EAB308; --confirm-ink:#6F5206;
+  --blocked:#DC2626; --blocked-ink:#A11818;
+
+  /* Neutral interactive accent -- deliberately NOT a fourth status hue.
+     Focus rings, switches, slider thumbs and operator-override marks use
+     it, so "a human did this" can never be misread as a detector state. */
+  --info:#48566A;
 
   /* spacing: 4px base, no in-between values anywhere */
   --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px; --sp-6:32px;
@@ -48,7 +66,9 @@
 html,body{height:100%}
 body{
   margin:0; background:var(--page); color:var(--text); font-family:var(--font);
-  font-size:var(--fs-base); line-height:1.45; -webkit-font-smoothing:antialiased;
+  /* no -webkit-font-smoothing:antialiased here -- it thins glyphs, which
+     helps light-on-dark and actively hurts dark-on-light legibility */
+  font-size:var(--fs-base); line-height:1.45;
   display:grid; gap:var(--sp-3); padding:var(--sp-3);
   grid-template-columns:minmax(0,3fr) minmax(380px,1.35fr);
   grid-template-rows:auto auto auto minmax(0,1fr) auto;
@@ -90,11 +110,11 @@ header h1 svg{width:19px;height:19px;color:var(--info)}
 .chip svg{width:14px;height:14px;flex:none}
 /* NOTE: render() assigns className="chip on|off|warn" wholesale, wiping any
    extra class. All per-chip styling therefore hangs off #id, never a class. */
-.chip.on{color:var(--clear); border-color:color-mix(in oklab,var(--clear) 40%,var(--border));
-  background:color-mix(in oklab,var(--clear) 7%,var(--inset))}
+.chip.on{color:var(--clear-ink); border-color:color-mix(in oklab,var(--clear) 45%,var(--border));
+  background:color-mix(in oklab,var(--clear) 12%,var(--panel))}
 .chip.off{color:var(--text-mute)}
-.chip.warn{color:var(--confirm); border-color:color-mix(in oklab,var(--confirm) 48%,var(--border));
-  background:color-mix(in oklab,var(--confirm) 9%,var(--inset))}
+.chip.warn{color:var(--confirm-ink); border-color:color-mix(in oklab,var(--confirm) 55%,var(--border));
+  background:color-mix(in oklab,var(--confirm) 18%,var(--panel))}
 #chipMute{cursor:pointer}
 #chipMute:hover,button.chip:hover{border-color:var(--border-strong); color:var(--text)}
 button.chip{cursor:pointer}
@@ -117,25 +137,21 @@ button.chip:active{transform:translateY(1px)}
 .safety-banner svg{width:26px;height:26px;flex:none}
 .safety-banner b{color:var(--text); font-weight:800; letter-spacing:.04em}
 #alertSupervisor{
-  background:linear-gradient(90deg,
-    color-mix(in oklab,var(--confirm) 22%,var(--panel)),
-    color-mix(in oklab,var(--confirm) 11%,var(--panel)));
-  border-color:color-mix(in oklab,var(--confirm) 55%,var(--border));
+  background:color-mix(in oklab,var(--confirm) 20%,var(--panel));
+  border-color:color-mix(in oklab,var(--confirm) 60%,var(--border));
   border-left:5px solid var(--confirm); color:var(--text-2)}
-#alertSupervisor svg{color:var(--confirm)}
+#alertSupervisor svg{color:var(--confirm-ink)}
+/* On a light page a red *tint* reads as a mild notice, not an alarm, so the
+   person-in-lane banner goes solid red with white text -- it should be the
+   single loudest thing on screen. */
 #alertPerson{
-  background:linear-gradient(90deg,
-    color-mix(in oklab,var(--blocked) 32%,var(--panel)),
-    color-mix(in oklab,var(--blocked) 15%,var(--panel)));
-  border-color:color-mix(in oklab,var(--blocked) 62%,var(--border));
-  border-left:5px solid var(--blocked); color:var(--text);
-  font-size:var(--fs-lg); font-weight:600; padding:var(--sp-4);
+  background:var(--blocked); border-color:var(--blocked-ink);
+  border-left:5px solid var(--blocked-ink); color:#fff;
+  font-size:var(--fs-lg); font-weight:650; padding:var(--sp-4);
   animation:safetyFlash 1s step-start infinite}
-#alertPerson svg{color:var(--blocked); width:30px;height:30px}
-@keyframes safetyFlash{50%{
-  background:linear-gradient(90deg,
-    color-mix(in oklab,var(--blocked) 52%,var(--panel)),
-    color-mix(in oklab,var(--blocked) 26%,var(--panel)))}}
+#alertPerson b{color:#fff}
+#alertPerson svg{color:#fff; width:30px;height:30px}
+@keyframes safetyFlash{50%{background:var(--blocked-ink)}}
 
 /* ---------- page-level escalation ----------
    Purely decorative overlay, driven entirely by :has() off the same .show /
@@ -176,8 +192,10 @@ body:has(#alertPerson.show) #pageAlert{display:block;
    top-left corner, so clicks anywhere else on the video hit nothing. */
 #calibLayer{position:absolute; inset:0; width:100%; height:100%; cursor:crosshair; display:none}
 #calibLayer.on{display:block}
+/* a lost feed is a fault, not an FYI -- it reads in the same red as every
+   other fault state on the page */
 #feedLost{position:absolute; inset:0; display:none; flex-direction:column; gap:var(--sp-3);
-  align-items:center; justify-content:center; background:var(--inset); color:var(--info);
+  align-items:center; justify-content:center; background:var(--inset); color:var(--blocked-ink);
   font-weight:800; font-size:var(--fs-md); letter-spacing:.16em}
 #feedLost.show{display:flex}
 #feedLost svg{width:44px;height:44px}
@@ -196,40 +214,41 @@ body:has(#alertPerson.show) #pageAlert{display:block;
 .side::-webkit-scrollbar-thumb:hover{background:var(--border-strong)}
 
 /* ---------- lane cards: the primary object on the page ---------- */
+/* --state fills bars, borders and the badge well; --state-ink is the same
+   hue at text-safe contrast. Both are set together per state so nothing can
+   drift apart. */
 .lane{position:relative; padding:var(--sp-4); border-radius:var(--r-card);
-  border:1px solid color-mix(in oklab,var(--state) 26%,var(--border));
+  border:1px solid color-mix(in oklab,var(--state) 34%,var(--border));
   border-left:5px solid var(--state);
-  background:
-    linear-gradient(160deg,
-      color-mix(in oklab,var(--state) 11%,var(--panel)),
-      color-mix(in oklab,var(--state) 3%,var(--panel)) 62%);
+  background:color-mix(in oklab,var(--state) 7%,var(--panel));
   transition:background var(--dur) var(--ease), border-color var(--dur) var(--ease),
              box-shadow var(--dur) var(--ease)}
-.lane[data-state=clear]{--state:var(--clear)}
-.lane[data-state=confirming]{--state:var(--confirm)}
+.lane[data-state=clear]{--state:var(--clear); --state-ink:var(--clear-ink)}
+.lane[data-state=confirming]{--state:var(--confirm); --state-ink:var(--confirm-ink)}
 /* blocked transitions instantly -- an easing curve on the most urgent state
    change on the page is 160ms of the operator seeing the wrong thing */
-.lane[data-state=blocked]{--state:var(--blocked); transition-duration:0ms;
+.lane[data-state=blocked]{--state:var(--blocked); --state-ink:var(--blocked-ink);
+  transition-duration:0ms;
   box-shadow:0 0 0 1px var(--blocked),
-             0 0 40px -10px color-mix(in oklab,var(--blocked) 72%,transparent)}
+             0 0 30px -12px color-mix(in oklab,var(--blocked) 60%,transparent)}
 
 .lane-top{display:flex; align-items:center; gap:var(--sp-3)}
 /* the icon sits in its own tinted well, so the state reads as a deliberate
    badge rather than a loose glyph floating next to text */
 .lane-badge{flex:none; width:46px; height:46px; border-radius:var(--r-inner);
   display:flex; align-items:center; justify-content:center;
-  background:color-mix(in oklab,var(--state) 15%,var(--inset));
-  border:1px solid color-mix(in oklab,var(--state) 34%,var(--border))}
-.lane-icon{width:26px;height:26px;color:var(--state)}
+  background:color-mix(in oklab,var(--state) 18%,var(--panel));
+  border:1px solid color-mix(in oklab,var(--state) 42%,var(--border))}
+.lane-icon{width:26px;height:26px;color:var(--state-ink)}
 .lane-id{display:flex; flex-direction:column; gap:2px; min-width:0}
 .lane-name{font-size:var(--fs-lbl); font-weight:700; letter-spacing:.16em; color:var(--text-2)}
 .lane-state{font-size:clamp(26px,2.5vw,36px); font-weight:800; letter-spacing:-.005em;
-  line-height:1; color:var(--state)}
+  line-height:1; color:var(--state-ink)}
 @keyframes pulse{50%{opacity:.4}}
 .lane[data-state=confirming] .lane-icon{animation:pulse 1.1s ease-in-out infinite}
 .ovr{margin-left:auto; align-self:flex-start; font-size:var(--fs-micro); font-weight:800;
   letter-spacing:.08em; padding:5px 9px; border-radius:var(--r-chip);
-  background:var(--blocked); color:var(--page); white-space:nowrap}
+  background:var(--blocked); color:#fff; white-space:nowrap}
 .ovr.green{background:var(--info)}
 
 .meter{margin-top:var(--sp-4)}
@@ -242,12 +261,15 @@ body:has(#alertPerson.show) #pageAlert{display:block;
   box-shadow:inset 0 0 0 1px var(--border-soft); overflow:hidden}
 .fill{height:100%; background:var(--state); border-radius:8px;
   transition:width 120ms linear}
+/* tick dividers are drawn in the PANEL colour, not the page colour: on the
+   light palette the track sits on a white card, and page-grey ticks were
+   near-invisible against a bright fill */
 .ticks{position:absolute; inset:0; pointer-events:none;
   background:repeating-linear-gradient(90deg,transparent 0 calc(12.5% - 1px),
-    color-mix(in oklab,var(--page) 70%,transparent) calc(12.5% - 1px) 12.5%)}
+    color-mix(in oklab,var(--panel) 85%,transparent) calc(12.5% - 1px) 12.5%)}
 .release{position:absolute; top:-3px; bottom:-3px; width:2px;
   background:var(--text); border-radius:1px;
-  box-shadow:0 0 0 1px color-mix(in oklab,var(--page) 80%,transparent)}
+  box-shadow:0 0 0 1px color-mix(in oklab,var(--panel) 80%,transparent)}
 .track2{margin-top:var(--sp-3); height:7px; border-radius:4px; background:var(--inset);
   box-shadow:inset 0 0 0 1px var(--border-soft); overflow:hidden}
 .fill2{height:100%; background:var(--text-2); border-radius:4px; transition:width 160ms var(--ease)}
@@ -265,9 +287,9 @@ body:has(#alertPerson.show) #pageAlert{display:block;
 .seg button+button{border-left:1px solid var(--border-soft)}
 .seg button:hover{background:var(--raised); color:var(--text)}
 .seg button:focus-visible{outline:2px solid var(--info); outline-offset:-2px; z-index:1}
-.seg button.sel{background:var(--text-2); color:var(--page)}
-.seg button.sel[data-mode=red]{background:var(--blocked); color:var(--page)}
-.seg button.sel[data-mode=green]{background:var(--info); color:var(--page)}
+.seg button.sel{background:var(--text-2); color:#fff}
+.seg button.sel[data-mode=red]{background:var(--blocked); color:#fff}
+.seg button.sel[data-mode=green]{background:var(--info); color:#fff}
 
 /* ---------- sections ---------- */
 .sect{padding:var(--sp-4)}
@@ -375,25 +397,25 @@ input[type=range]:focus-visible{outline:2px solid var(--info); outline-offset:4p
    so an alarming tile doesn't fight the strip's own edges */
 .tile::before{content:""; position:absolute; top:0; left:0; right:0; height:2px;
   background:transparent}
-.tile.ok .v{color:var(--clear)}
+.tile.ok .v{color:var(--clear-ink)}
 .tile.warn::before{background:var(--confirm)}
-.tile.warn .v{color:var(--confirm)}
-.tile.warn{background:color-mix(in oklab,var(--confirm) 7%,transparent)}
+.tile.warn .v{color:var(--confirm-ink)}
+.tile.warn{background:color-mix(in oklab,var(--confirm) 14%,transparent)}
 .tile.alarm::before{background:var(--blocked)}
-.tile.alarm .v{color:var(--blocked)}
+.tile.alarm .v{color:var(--blocked-ink)}
 .tile.alarm{background:color-mix(in oklab,var(--blocked) 10%,transparent)}
 
 /* ---------- modal ---------- */
-#modal{position:fixed; inset:0; background:rgba(4,6,10,.82); backdrop-filter:blur(3px);
+#modal{position:fixed; inset:0; background:rgba(22,28,36,.55); backdrop-filter:blur(3px);
   display:none; align-items:center; justify-content:center; z-index:50; padding:var(--sp-4)}
 #modal.show{display:flex}
 .mbox{width:min(500px,94vw); padding:var(--sp-5); border-radius:var(--r-card);
-  background:var(--panel); border:1px solid color-mix(in oklab,var(--blocked) 55%,var(--border));
+  background:var(--panel); border:1px solid color-mix(in oklab,var(--blocked) 45%,var(--border));
   border-top:3px solid var(--blocked);
-  box-shadow:0 28px 70px -14px rgba(0,0,0,.72)}
+  box-shadow:0 20px 48px -16px rgba(22,28,36,.32)}
 .mbox h3{margin:0 0 var(--sp-3); font-size:var(--fs-xl); font-weight:750; line-height:1.2;
   display:flex; align-items:center; gap:var(--sp-3)}
-.mbox h3 svg{width:24px;height:24px;color:var(--blocked); flex:none}
+.mbox h3 svg{width:24px;height:24px;color:var(--blocked-ink); flex:none}
 .mbox p{color:var(--text-2); font-size:var(--fs-base); line-height:1.65; margin:0 0 var(--sp-5)}
 .mrow{display:flex; gap:var(--sp-3)}
 /* button.act sets width:100%, which fights flex sizing here -- without this
@@ -426,8 +448,10 @@ input[type=range]:focus-visible{outline:2px solid var(--info); outline-offset:4p
   *{animation:none !important; transition-duration:0ms !important}
   /* the two flashing safety cues are the whole point of those elements, so
      they get a static high-contrast substitute rather than simply vanishing */
-  #alertPerson{background:color-mix(in oklab,var(--blocked) 42%,var(--panel)) !important;
-    outline:3px solid var(--blocked); outline-offset:-3px}
+  /* already solid red -- keep it solid (the flash only alternated the shade)
+     and add an inner rule so it still reads as escalated without motion */
+  #alertPerson{background:var(--blocked) !important;
+    outline:3px solid var(--blocked-ink); outline-offset:-3px}
   body:has(#alertPerson.show) #pageAlert{
     box-shadow:inset 0 0 0 6px var(--blocked) !important}
   .lane[data-state=confirming] .lane-icon{outline:2px dashed var(--confirm);
@@ -799,7 +823,11 @@ function drawCalib(){
   let w=r.width,h=r.height,ox=0,oy=0;
   if(br>ar){w=r.height*ar; ox=(r.width-w)/2;} else {h=r.width/ar; oy=(r.height-h)/2;}
   const g=c.getContext("2d"); g.clearRect(0,0,c.width,c.height);
-  for(const [lane,col] of [["A","#12D18C"],["B","#5B9DFF"]]){
+  // Drawn over the live video, not over the page, so these are picked for
+  // visibility against arbitrary camera footage rather than to match the
+  // page palette: green for A, white for B. White stays legible on the dim
+  // footage this rig actually produces, where a mid-tone would vanish.
+  for(const [lane,col] of [["A","#16A34A"],["B","#FFFFFF"]]){
     const pts=calib.pts[lane]; if(!pts.length) continue;
     g.strokeStyle=col; g.fillStyle=col; g.lineWidth=2.5; g.beginPath();
     pts.forEach(([x,y],i)=>{const px=ox+x*w,py=oy+y*h; i?g.lineTo(px,py):g.moveTo(px,py);});
@@ -807,7 +835,7 @@ function drawCalib(){
     g.stroke();
     pts.forEach(([x,y],i)=>{const px=ox+x*w,py=oy+y*h;
       g.beginPath(); g.arc(px,py,7,0,7); g.fill();
-      g.fillStyle="#070A0F"; g.font="bold 11px system-ui"; g.textAlign="center";
+      g.fillStyle="#161C24"; g.font="bold 11px system-ui"; g.textAlign="center";
       g.fillText(i+1,px,py+4); g.fillStyle=col;});
   }
   document.getElementById("calibHint").textContent=
